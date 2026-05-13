@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GATEWAY="${H3C_GATEWAY:-vpn.example.com:443}"
+AUTH_FILE="$PWD/.auth"
+
+if [ -f "$AUTH_FILE" ]; then
+    read -r USERNAME < "$AUTH_FILE"
+    read -r PASSWORD < <(sed -n '2p' "$AUTH_FILE")
+    SERVERCERT=$(sed -n '3p' "$AUTH_FILE" 2>/dev/null || true)
+
+    CERT_ARGS=""
+    if [ -n "${SERVERCERT:-}" ] && [ "${SERVERCERT:-}" != "" ]; then
+        CERT_ARGS="--servercert $SERVERCERT"
+    fi
+
+    printf "%s\n" "$PASSWORD" | \
+        sudo openconnect --protocol=h3c --passwd-on-stdin --background $CERT_ARGS "$GATEWAY" -u "$USERNAME" "$@"
+else
+    echo "未找到 .auth 文件，手动输入凭据"
+    sudo openconnect --protocol=h3c --background "$GATEWAY" "$@"
+fi
