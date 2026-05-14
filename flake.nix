@@ -45,17 +45,18 @@
             #!${pkgs.bash}/bin/bash
             set -euo pipefail
 
-            GATEWAY="''${H3C_GATEWAY:-vpn.example.com:443}"
+            GATEWAY="''${H3C_GATEWAY:-}"
             AUTH_FILE="$PWD/.auth"
             VPN_DIR="$HOME/.vpn"
             PID_FILE="$VPN_DIR/vpn-pid"
             LOG_FILE="$VPN_DIR/vpn-log"
 
             if [ -f "$AUTH_FILE" ]; then
-                read -r USERNAME < "$AUTH_FILE"
-                read -r PASSWORD < <(sed -n '2p' "$AUTH_FILE")
-                SERVERCERT=$(sed -n '3p' "$AUTH_FILE" 2>/dev/null || true)
-                AUTH_GATEWAY=$(sed -n '4p' "$AUTH_FILE" 2>/dev/null || true)
+                auth_val() { sed -n "s/^$1=//p" "$AUTH_FILE" | head -1; }
+                USERNAME=$(auth_val username)
+                PASSWORD=$(auth_val password)
+                SERVERCERT=$(auth_val servercert)
+                AUTH_GATEWAY=$(auth_val gateway)
                 if [ -n "''${AUTH_GATEWAY:-}" ]; then
                     GATEWAY="$AUTH_GATEWAY"
                 fi
@@ -116,7 +117,6 @@
             vpn-script
           ];
 
-          H3C_GATEWAY = "vpn.example.com:443";
 
           shellHook = ''
             echo "🔐 VPN 环境就绪 (openconnect-h3c)"

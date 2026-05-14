@@ -1,4 +1,4 @@
-your_username
-your_password
-pin-sha256:ffffffffffffffffffffffffffffffffffffffffffff
-vpn.example.com:443
+username=your_username
+password=your_password
+servercert=pin-sha256:ffffffffffffffffffffffffffffffffffffffffffff
+gateway=vpn.example.com:443
