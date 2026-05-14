@@ -2,5 +2,4 @@
 result
 .claude
 openconnect-h3c
-.vpn-pid
-.vpn-log
+run/

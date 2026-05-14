@@ -1,0 +1,34 @@
+--- a/h3c.c
++++ b/h3c.c
+@@ -512,6 +512,8 @@
+
+ int h3c_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
+ {
++	int work_done = 0;
++
+ 	while (readable) {
+ 		/* Some servers send us packets that are larger than
+ 		   negotiated MTU. We reserve some extra space to
+@@ -569,18 +571,21 @@
+
+ 		queue_packet(&vpninfo->incoming_queue, vpninfo->cstp_pkt);
+ 		vpninfo->cstp_pkt = NULL;
++		work_done++;
+ 	}
+
+ 	if (vpninfo->current_ssl_pkt) {
+ 		/* TODO: we don't know what to do yet */
+ 		h3c_handle_outgoing(vpninfo);
+ 		vpninfo->current_ssl_pkt = NULL;
++		work_done++;
+ 	}
+
+ 	while ((vpninfo->current_ssl_pkt = dequeue_packet(&vpninfo->outgoing_queue))) {
+ 		h3c_handle_outgoing(vpninfo);
++		work_done++;
+ 	}
+-	return 1;
++	return work_done;
+ }
+
+ void h3c_http_headers(struct openconnect_info *vpninfo, struct oc_text_buf *buf)
