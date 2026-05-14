@@ -51,6 +51,16 @@
             PID_FILE="$VPN_DIR/vpn-pid"
             LOG_FILE="$VPN_DIR/vpn-log"
 
+            if [ -f "$AUTH_FILE" ]; then
+                read -r USERNAME < "$AUTH_FILE"
+                read -r PASSWORD < <(sed -n '2p' "$AUTH_FILE")
+                SERVERCERT=$(sed -n '3p' "$AUTH_FILE" 2>/dev/null || true)
+                AUTH_GATEWAY=$(sed -n '4p' "$AUTH_FILE" 2>/dev/null || true)
+                if [ -n "''${AUTH_GATEWAY:-}" ]; then
+                    GATEWAY="$AUTH_GATEWAY"
+                fi
+            fi
+
             if [ "''${1:-}" = "stop" ]; then
                 if [ -f "$PID_FILE" ]; then
                     sudo kill "$(cat "$PID_FILE")" 2>/dev/null || true
@@ -66,10 +76,6 @@
             OPENCONNECT="${pkgs.openconnect_h3c}/bin/openconnect"
 
             if [ -f "$AUTH_FILE" ]; then
-                read -r USERNAME < "$AUTH_FILE"
-                read -r PASSWORD < <(sed -n '2p' "$AUTH_FILE")
-                SERVERCERT=$(sed -n '3p' "$AUTH_FILE" 2>/dev/null || true)
-
                 CERT_ARG=()
                 if [ -n "''${SERVERCERT:-}" ] && [ "''${SERVERCERT:-}" != "" ]; then
                     CERT_ARG=(--servercert "$SERVERCERT")
