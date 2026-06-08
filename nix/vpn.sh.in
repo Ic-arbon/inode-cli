@@ -1,0 +1,332 @@
+#!@bash@/bin/bash
+set -euo pipefail
+
+# LaunchAgent 环境 PATH 极简，补上系统目录以便找到 sudo/pkill/launchctl
+export PATH="$PATH:/usr/bin:/bin:/usr/sbin:/sbin"
+
+GATEWAY="${H3C_GATEWAY:-}"
+VPN_DIR="$HOME/.vpn"
+PID_FILE="$VPN_DIR/vpn-pid"
+LOG_FILE="$VPN_DIR/vpn-log"
+DIR_FILE="$VPN_DIR/vpn-dir"
+
+mkdir -p "$VPN_DIR"
+@watchLink@
+
+# 安全兜底：symlink 断链或不存在时修复（不删已有有效 symlink，避免竞态）
+if [ ! -L "$VPN_DIR/vpn" ] || [ ! -e "$VPN_DIR/vpn" ]; then
+    rm -f "$VPN_DIR/vpn"
+    SELF_DIR="$(cd "$(dirname "$0")" && pwd -P || echo "$PWD")"
+    SELF_PATH="$SELF_DIR/$(basename "$0")"
+    if [ "$SELF_PATH" != "$VPN_DIR/vpn" ]; then
+        ln -sf "$SELF_PATH" "$VPN_DIR/vpn"
+    fi
+fi
+
+# ===== 内部工具 =====
+
+PING_TARGET="${VPN_PING_TARGET:-192.168.18.1}"
+WATCHDOG_PID_FILE="$VPN_DIR/watchdog-pid"
+MAX_LOG_SIZE=104857600  # 100MB
+
+# 以 ping 判断隧道是否真正连通（真实 IP 层可达性），
+# 避免"openconnect 进程还在但隧道已断/忙循环"的假阳性
+is_vpn_alive() {
+    ping -c 1 -t 2 "$PING_TARGET" >/dev/null 2>&1
+}
+
+# 日志护栏：超过 100MB 截断保留尾部
+log_guard() {
+    if [ -f "$LOG_FILE" ]; then
+        local sz
+        sz=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+        if [ "$sz" -gt "$MAX_LOG_SIZE" ]; then
+            tail -n 2000 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+        fi
+    fi
+}
+
+# 看门狗：常驻后台，每 30s 检测一次连通性 + 日志大小
+# 若隧道断开则自动调用 start-nodog 重连，不会递归叠加看门狗
+vpn_watchdog() {
+    local WD_LOG="$VPN_DIR/watchdog-log"
+    while true; do
+        sleep 30
+        if ! is_vpn_alive; then
+            echo "[$(date)] VPN 断开，触发重连" >> "$WD_LOG"
+            "$0" start-nodog >> "$WD_LOG" 2>&1
+        fi
+        log_guard
+    done
+}
+
+# 仿 systemd 用法：首个参数为子命令，其余参数透传
+CMD="${1:-}"
+if [ "$#" -gt 0 ]; then shift; fi
+
+usage() {
+    echo "用法: vpn <命令> [参数]" >&2
+    echo "" >&2
+    echo "  start             连接 VPN（在含 .auth 的目录中运行）" >&2
+    echo "  stop              断开 VPN" >&2
+    echo "  restart           断开后在当前目录重新连接" >&2
+    echo "  status            查看连接与自动重连服务状态" >&2
+    echo "  enable [--now]    安装开盖唤醒自动重连服务（macOS）；--now 同时立即连接" >&2
+    echo "  disable [--now]   移除自动重连服务；--now 同时立即断开" >&2
+    echo "  install-sudoers   写入 openconnect 的 sudo 免密规则（macOS，一次性）" >&2
+    echo "  uninstall-sudoers 移除 sudo 免密规则" >&2
+}
+
+# reconnect：回到上次成功启动的目录后重连（hook 唤醒时调用，内部命令）
+if [ "$CMD" = "reconnect" ]; then
+    if [ ! -s "$DIR_FILE" ]; then
+        echo "未找到上次 VPN 工作目录，请先在项目目录手动运行一次 vpn start" >&2
+        exit 1
+    fi
+    TARGET=$(cat "$DIR_FILE")
+    if [ ! -d "$TARGET" ]; then
+        echo "记录的 VPN 目录已不存在: $TARGET" >&2
+        exit 1
+    fi
+    cd "$TARGET"
+    "$0" stop || true
+    exec "$0" start
+fi
+
+# enable：安装开盖唤醒自动重连服务（macOS）；--now 同时立即连接
+if [ "$CMD" = "enable" ]; then
+    if [ "$(uname)" != "Darwin" ]; then
+        echo "enable 仅支持 macOS" >&2
+        exit 1
+    fi
+    PLIST="$HOME/Library/LaunchAgents/com.user.vpn-reconnect.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    {
+        echo '<?xml version="1.0" encoding="UTF-8"?>'
+        echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+        echo '<plist version="1.0"><dict>'
+        echo '<key>Label</key><string>com.user.vpn-reconnect</string>'
+        echo '<key>ProgramArguments</key>'
+        echo "<array><string>$VPN_DIR/vpn-watch</string></array>"
+        echo '<key>RunAtLoad</key><true/>'
+        echo '<key>KeepAlive</key><true/>'
+        echo '</dict></plist>'
+    } > "$PLIST"
+    launchctl unload "$PLIST" 2>/dev/null || true
+    launchctl load "$PLIST"
+    echo "已安装开盖唤醒自动重连服务"
+    echo "提示：需先配置 openconnect 的 sudo 免密（vpn install-sudoers），否则唤醒重连会因等待 sudo 密码而失败"
+    if [ "${1:-}" = "--now" ]; then
+        exec "$0" start
+    fi
+    exit 0
+fi
+
+# disable：移除自动重连服务；--now 同时立即断开
+if [ "$CMD" = "disable" ]; then
+    PLIST="$HOME/Library/LaunchAgents/com.user.vpn-reconnect.plist"
+    launchctl unload "$PLIST" 2>/dev/null || true
+    rm -f "$PLIST"
+    echo "已移除开盖唤醒自动重连服务"
+    if [ "${1:-}" = "--now" ]; then
+        exec "$0" stop
+    fi
+    exit 0
+fi
+
+# status：查看连接、工作目录与自动重连服务状态（仿 systemctl status，
+# 退出码：已连接 0 / 未连接 3）
+# 以 ping 网关为真实连通性判断，不再仅依赖 PID 存活
+if [ "$CMD" = "status" ]; then
+    RC=3
+    if is_vpn_alive; then
+        PID_INFO=""
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            PID_INFO=" (pid $(cat "$PID_FILE"))"
+        fi
+        echo "● vpn - 已连接 (active, running)$PID_INFO"
+        RC=0
+    else
+        echo "○ vpn - 未连接 (inactive)"
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            echo "  ⚠ 进程存活但 ping $PING_TARGET 不通 — 建议运行 vpn restart"
+        fi
+    fi
+    if [ -s "$DIR_FILE" ]; then
+        echo "  工作目录: $(cat "$DIR_FILE")"
+    fi
+    # 看门狗状态
+    if [ -f "$WATCHDOG_PID_FILE" ] && kill -0 "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null; then
+        echo "  看门狗: running (pid $(cat "$WATCHDOG_PID_FILE"))"
+    else
+        echo "  看门狗: stopped"
+    fi
+    if [ "$(uname)" = "Darwin" ]; then
+        PLIST="$HOME/Library/LaunchAgents/com.user.vpn-reconnect.plist"
+        if [ -f "$PLIST" ]; then
+            if launchctl list 2>/dev/null | grep -q com.user.vpn-reconnect; then
+                echo "  开盖自动重连: enabled (已加载)"
+            else
+                echo "  开盖自动重连: enabled (未加载)"
+            fi
+        else
+            echo "  开盖自动重连: disabled"
+        fi
+    fi
+    if [ -s "$LOG_FILE" ]; then
+        echo "  最近日志:"
+        tail -n 3 "$LOG_FILE" | sed 's/^/    /'
+    fi
+    exit "$RC"
+fi
+
+# install-sudoers：写入 openconnect / kill / pkill 的 sudo 免密规则，
+# 使 hook 唤醒重连无需交互输入 sudo 密码（首次写入需一次 sudo 授权）
+if [ "$CMD" = "install-sudoers" ]; then
+    if [ "$(uname)" != "Darwin" ]; then
+        echo "install-sudoers 目前仅适配 macOS 命令路径" >&2
+        exit 1
+    fi
+    USER_NAME=$(id -un)
+    TMP=$(mktemp)
+    {
+        echo "# openconnect-h3c VPN 免密规则，由 vpn install-sudoers 生成"
+        echo "$USER_NAME ALL=(root) NOPASSWD: /nix/store/*/bin/openconnect, /bin/kill, /usr/bin/pkill"
+    } > "$TMP"
+    if ! visudo -c -f "$TMP" >/dev/null; then
+        echo "sudoers 语法校验失败，未写入" >&2
+        rm -f "$TMP"
+        exit 1
+    fi
+    echo "即将写入 /etc/sudoers.d/vpn（需要一次 sudo 授权）："
+    sed 's/^/  /' "$TMP"
+    sudo install -m 0440 -o root -g wheel "$TMP" /etc/sudoers.d/vpn
+    rm -f "$TMP"
+    echo "已安装 sudo 免密规则"
+    exit 0
+fi
+
+if [ "$CMD" = "uninstall-sudoers" ]; then
+    sudo rm -f /etc/sudoers.d/vpn
+    echo "已移除 sudo 免密规则"
+    exit 0
+fi
+
+AUTH_FILE="$PWD/.auth"
+if [ -f "$AUTH_FILE" ]; then
+    auth_val() { sed -n "s/^$1=//p" "$AUTH_FILE" | head -1; }
+    USERNAME=$(auth_val username)
+    PASSWORD=$(auth_val password)
+    SERVERCERT=$(auth_val servercert)
+    AUTH_GATEWAY=$(auth_val gateway)
+    if [ -n "${AUTH_GATEWAY:-}" ]; then
+        GATEWAY="$AUTH_GATEWAY"
+    fi
+fi
+
+if [ "$CMD" = "stop" ]; then
+    # 终止看门狗（含无 PID 文件的僵尸看门狗残留）
+    # [v] 技巧防止 pkill 匹配自身
+    if [ -f "$WATCHDOG_PID_FILE" ]; then
+        kill "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null || true
+        rm -f "$WATCHDOG_PID_FILE"
+    fi
+    pkill -f "[v]pn.*start" 2>/dev/null || true
+    # 强制终止所有 openconnect（含 sudo 包装和僵死子进程）
+    # [o] 技巧防止 pkill 匹配自身的命令行
+    sudo pkill -9 -f "[o]penconnect" 2>/dev/null || true
+    rm -f "$PID_FILE"
+    echo "VPN 已停止"
+    exit 0
+fi
+
+# restart：当前目录下断开后重连
+if [ "$CMD" = "restart" ]; then
+    "$0" stop || true
+    exec "$0" start "$@"
+fi
+
+# 至此接受 start、start-nodog（内部）或裸命令显示用法
+if [ -z "$CMD" ]; then
+    usage
+    exit 0
+fi
+if [ "$CMD" != "start" ] && [ "$CMD" != "start-nodog" ]; then
+    echo "未知命令: $CMD" >&2
+    usage
+    exit 1
+fi
+
+# 启动前日志护栏（>100MB 截断，防重启后旧日志撑满磁盘）
+log_guard
+
+# 维护家目录下的稳定入口（绝对路径），仅在 start/start-nodog 时刷新，
+# 避免 status/stop 等命令并发删建 symlink 导致竞态。
+rm -f "$VPN_DIR/vpn"
+SELF_DIR="$(cd "$(dirname "$0")" && pwd -P || echo "$PWD")"
+SELF_PATH="$SELF_DIR/$(basename "$0")"
+if [ "$SELF_PATH" != "$VPN_DIR/vpn" ]; then
+    ln -sf "$SELF_PATH" "$VPN_DIR/vpn"
+fi
+
+# 终止旧看门狗（含无 PID 文件的僵尸残留），避免重连后看门狗叠加
+if [ -f "$WATCHDOG_PID_FILE" ]; then
+    kill "$(cat "$WATCHDOG_PID_FILE")" 2>/dev/null || true
+    rm -f "$WATCHDOG_PID_FILE"
+fi
+# [v] 技巧防止 pkill 匹配自身
+pkill -f "[v]pn.*start" 2>/dev/null || true
+
+OPENCONNECT="@openconnect@/bin/openconnect"
+
+if [ -f "$AUTH_FILE" ]; then
+    CERT_ARG=()
+    if [ -n "${SERVERCERT:-}" ] && [ "${SERVERCERT:-}" != "" ]; then
+        CERT_ARG=(--servercert "$SERVERCERT")
+    fi
+
+    # 先杀干净残留 openconnect（可能忙循环占满 CPU）
+    # [o] 技巧防止 pkill 匹配自身的命令行
+    sudo pkill -9 -f "[o]penconnect" 2>/dev/null || true
+    rm -f "$PID_FILE"
+
+    printf "%s\n" "$PASSWORD" | \
+        sudo "$OPENCONNECT" --protocol=h3c --passwd-on-stdin --no-dtls "${CERT_ARG[@]}" "$GATEWAY" -u "$USERNAME" "$@" > "$LOG_FILE" 2>&1 &
+    PID=$!
+    echo "$PID" > "$PID_FILE"
+
+    # 等待并 ping 验证隧道真正可用（最多等 ~13s）
+    sleep 3
+    CONNECTED=0
+    for i in 1 2 3 4 5; do
+        if is_vpn_alive; then
+            CONNECTED=1
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "$CONNECTED" = "1" ]; then
+        echo "$PWD" > "$DIR_FILE"
+        echo "VPN 已连接 (pid $PID)"
+
+        # 仅 start 启动看门狗；start-nodog 不启动（看门狗调用，避免递归）
+        if [ "$CMD" = "start" ]; then
+            vpn_watchdog &
+            echo "$!" > "$WATCHDOG_PID_FILE"
+            echo "看门狗已启动 (pid $!)"
+        fi
+    else
+        echo "VPN 启动失败（进程存活但 ping $PING_TARGET 不通）"
+        echo "最后几行日志："
+        tail -n 5 "$LOG_FILE"
+        if kill -0 "$PID" 2>/dev/null; then
+            sudo kill -9 "$PID" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+        exit 1
+    fi
+else
+    echo "未找到 .auth 文件，手动输入凭据"
+    sudo "$OPENCONNECT" --protocol=h3c --no-dtls "$GATEWAY" "$@"
+fi
