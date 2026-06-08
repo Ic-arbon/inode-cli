@@ -280,6 +280,30 @@ pkill -f "[v]pn.*start" 2>/dev/null || true
 OPENCONNECT="@openconnect@/bin/openconnect"
 
 if [ -f "$AUTH_FILE" ]; then
+    # 缺少 servercert 时先探测网关证书指纹并写回 .auth。
+    # 否则后台运行的 openconnect 会卡在交互式"是否信任证书 (yes/no)"
+    # 提示上——stdin 只喂了密码，无人应答证书确认 → start 卡死。
+    # 探测原理：喂 "no" 让 openconnect 在证书确认处主动 abort，
+    # 此前它已把 "pin-sha256:..." 指纹打到输出，从中提取即可。
+    if [ -z "${SERVERCERT:-}" ]; then
+        echo "未配置 servercert，正在探测网关证书指纹..."
+        DISCOVER_OUT=$(printf 'no\n' | "$OPENCONNECT" --protocol=h3c --no-dtls "$GATEWAY" 2>&1 || true)
+        # 网关多为 pin-sha256:<base64>，也兼容旧式 sha256:<hex>
+        SERVERCERT=$(printf '%s\n' "$DISCOVER_OUT" | grep -oE '(pin-)?sha256:[A-Za-z0-9+/=]+' | head -1)
+        if [ -z "$SERVERCERT" ]; then
+            echo "未能自动探测到证书指纹，请检查网关地址/网络连通性" >&2
+            printf '%s\n' "$DISCOVER_OUT" | tail -n 10 >&2
+            exit 1
+        fi
+        if grep -q '^servercert=' "$AUTH_FILE"; then
+            TMP_AUTH=$(mktemp)
+            sed "s|^servercert=.*|servercert=$SERVERCERT|" "$AUTH_FILE" > "$TMP_AUTH" && mv "$TMP_AUTH" "$AUTH_FILE"
+        else
+            printf 'servercert=%s\n' "$SERVERCERT" >> "$AUTH_FILE"
+        fi
+        echo "已获取并写入 servercert: $SERVERCERT"
+    fi
+
     CERT_ARG=()
     if [ -n "${SERVERCERT:-}" ] && [ "${SERVERCERT:-}" != "" ]; then
         CERT_ARG=(--servercert "$SERVERCERT")
