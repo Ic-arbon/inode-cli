@@ -113,7 +113,7 @@ if [ "$CMD" = "enable" ]; then
         echo '</dict></plist>'
     } > "$PLIST"
     launchctl unload "$PLIST" 2>/dev/null || true
-    launchctl load "$PLIST"
+    launchctl load "$PLIST" 2>/dev/null || true
     echo "已安装开盖唤醒自动重连服务"
     echo "提示：需先配置 openconnect 的 sudo 免密（vpn install-sudoers），否则唤醒重连会因等待 sudo 密码而失败"
     if [ "${1:-}" = "--now" ]; then
