@@ -75,6 +75,29 @@ refresh_self_link() {
     fi
 }
 
+# 优雅停止 openconnect：先 SIGTERM，让其 vpnc-script 跑 teardown
+# （自动删除"到网关"的主机路由并拆除 tun），等它退出；最多等 ~5s 仍在再 SIGKILL 兜底。
+# 直接 -9 会跳过 teardown，遗留脏路由 → 盒盖换网/续 DHCP 后新连接 connect()
+# 被内核按死路由送出 → Can't assign requested address (EADDRNOTAVAIL)，且重启系统前无法自愈。
+graceful_kill_openconnect() {
+    pgrep -f "[o]penconnect" >/dev/null 2>&1 || return 0
+    sudo pkill -TERM -f "[o]penconnect" 2>/dev/null || true
+    local i
+    for i in $(seq 1 10); do
+        pgrep -f "[o]penconnect" >/dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+    sudo pkill -9 -f "[o]penconnect" 2>/dev/null || true
+}
+
+# 兜底清理残留的"到 VPN 网关"主机路由：当上次是 -9 强杀或睡眠把进程卡死、
+# teardown 没跑成时，会遗留一条指向旧网络下一跳的 STATIC 主机路由。换网/续 DHCP
+# 后该下一跳不可达，源地址失效，导致新连接长期失败。启动前主动删一次即可解套。
+clean_stale_gateway_route() {
+    [ -n "${GATEWAY:-}" ] || return 0
+    sudo route delete -host "$GATEWAY" >/dev/null 2>&1 || true
+}
+
 # 仿 systemd 用法：首个参数为子命令，其余参数透传
 CMD="${1:-}"
 if [ "$#" -gt 0 ]; then shift; fi
@@ -246,7 +269,10 @@ if [ "$CMD" = "install-sudoers" ]; then
     TMP=$(mktemp)
     {
         echo "# openconnect-h3c VPN 免密规则，由 vpn install-sudoers 生成"
-        echo "$USER_NAME ALL=(root) NOPASSWD: /nix/store/*/bin/openconnect, /bin/kill, /usr/bin/pkill"
+        # /sbin/route 免密是关键：clean_stale_gateway_route 需删残留网关主机路由，
+        # 否则 launchd 无 tty / 手动时 prompt 被吞 → 删除静默失败 → 换网段后脏路由
+        # 遗留、connect() 报 EADDRNOTAVAIL，且重启系统前无法自愈。
+        echo "$USER_NAME ALL=(root) NOPASSWD: /nix/store/*/bin/openconnect, /bin/kill, /usr/bin/pkill, /sbin/route"
     } > "$TMP"
     if ! visudo -c -f "$TMP" >/dev/null; then
         echo "sudoers 语法校验失败，未写入" >&2
@@ -285,9 +311,10 @@ if [ "$CMD" = "stop" ]; then
     rm -f "$DIR_FILE"
     # [v] 技巧防止 pkill 匹配自身；杀掉正在进行的 start（含 reconnect 触发的）
     pkill -f "[v]pn.*start" 2>/dev/null || true
-    # 强制终止所有 openconnect（含 sudo 包装和僵死子进程）
-    # [o] 技巧防止 pkill 匹配自身的命令行
-    sudo pkill -9 -f "[o]penconnect" 2>/dev/null || true
+    # 优雅终止 openconnect，让它自行删除网关主机路由+拆 tun；卡死才 -9 兜底
+    graceful_kill_openconnect
+    # 兜底：万一 teardown 没跑成，主动清掉残留的网关主机路由
+    clean_stale_gateway_route
     rm -f "$PID_FILE"
     echo "VPN 已停止"
     exit 0
@@ -351,9 +378,11 @@ if [ -f "$AUTH_FILE" ]; then
         CERT_ARG=(--servercert "$SERVERCERT")
     fi
 
-    # 先杀干净残留 openconnect（可能忙循环占满 CPU）
-    # [o] 技巧防止 pkill 匹配自身的命令行
-    sudo pkill -9 -f "[o]penconnect" 2>/dev/null || true
+    # 先优雅停掉残留 openconnect（让其 teardown 删路由），卡死再 -9
+    graceful_kill_openconnect
+    # 兜底：清掉上一轮 -9/睡眠卡死遗留的网关主机路由，否则本次 connect()
+    # 会被脏路由送往不可达的旧网关 → Can't assign requested address
+    clean_stale_gateway_route
     rm -f "$PID_FILE"
 
     printf "%s\n" "$PASSWORD" | \
