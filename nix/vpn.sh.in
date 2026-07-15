@@ -94,8 +94,11 @@ graceful_kill_openconnect() {
 # teardown 没跑成时，会遗留一条指向旧网络下一跳的 STATIC 主机路由。换网/续 DHCP
 # 后该下一跳不可达，源地址失效，导致新连接长期失败。启动前主动删一次即可解套。
 clean_stale_gateway_route() {
-    [ -n "${GATEWAY:-}" ] || return 0
-    sudo route delete -host "$GATEWAY" >/dev/null 2>&1 || true
+    # GATEWAY 含 :port（如 140.206.103.26:2000，供 openconnect 用），但路由表以裸 IP
+    # 为目的地；route delete -host 带端口会 "not in table" 静默失败。剥掉端口再删。
+    local host="${GATEWAY%%:*}"
+    [ -n "$host" ] || return 0
+    sudo route delete -host "$host" >/dev/null 2>&1 || true
 }
 
 # 仿 systemd 用法：首个参数为子命令，其余参数透传
