@@ -56,7 +56,7 @@ Type=simple
 User=root
 ExecStart={exec} --uid {uid}
 RuntimeDirectory=inode-vpn
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0755
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -261,6 +261,7 @@ mod tests {
         assert!(text.contains("ExecStart=/var/lib/inode-vpn/current/bin/inode-vpnd --uid 501"));
         assert!(text.contains("Restart=always"));
         assert!(text.contains("RuntimeDirectory=inode-vpn"));
+        assert!(text.contains("RuntimeDirectoryMode=0755"));
         assert!(text.contains("WantedBy=multi-user.target"));
         assert!(text.contains("CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID"));
         assert!(text.contains("ProtectSystem=strict"));
