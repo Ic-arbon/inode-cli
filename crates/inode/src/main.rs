@@ -432,7 +432,7 @@ fn main() {
         Command::Logs { follow } => {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
-                if let Err(e) = service::logs(euid(), follow) {
+                if let Err(e) = service::logs(service::target_uid(), follow) {
                     eprintln!("{e}");
                     std::process::exit(1);
                 }
@@ -454,8 +454,8 @@ fn main() {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 let result = match command {
-                    Command::Enable { .. } => service::enable(euid(), now),
-                    Command::Disable { .. } => service::disable(euid(), now),
+                    Command::Enable { .. } => service::enable(service::target_uid(), now),
+                    Command::Disable { .. } => service::disable(service::target_uid(), now),
                     _ => unreachable!(),
                 };
                 if let Err(e) = result {

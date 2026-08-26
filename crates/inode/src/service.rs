@@ -11,6 +11,22 @@ pub fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// The user whose VPN service we are managing.
+///
+/// `sudo inode enable` runs as root, so geteuid() alone would install
+/// `inode-vpnd@0.service`. Prefer the user that invoked sudo (SUDO_UID),
+/// with INODE_SERVICE_UID as an explicit override for tests/scripts.
+pub fn target_uid() -> u32 {
+    for var in ["INODE_SERVICE_UID", "SUDO_UID"] {
+        if let Ok(raw) = std::env::var(var) {
+            if let Ok(uid) = raw.trim().parse::<u32>() {
+                return uid;
+            }
+        }
+    }
+    euid()
+}
+
 #[allow(dead_code)]
 pub fn unit_name_for(uid: u32) -> String {
     format!("{UNIT_NAME}{uid}.service")
@@ -243,6 +259,19 @@ mod tests {
         assert!(text.contains("CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID"));
         assert!(text.contains("ProtectSystem=strict"));
         assert!(text.contains("ProtectHome=read-only"));
+    }
+
+    #[test]
+    fn target_uid_prefers_env_overrides() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var("INODE_SERVICE_UID").ok();
+        std::env::set_var("INODE_SERVICE_UID", "501");
+        assert_eq!(target_uid(), 501);
+        match old {
+            Some(v) => std::env::set_var("INODE_SERVICE_UID", v),
+            None => std::env::remove_var("INODE_SERVICE_UID"),
+        }
     }
 
     #[cfg(target_os = "macos")]
