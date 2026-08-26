@@ -60,6 +60,10 @@ WantedBy=multi-user.target
 }
 
 fn sudo(args: &[&str]) -> Result<(), String> {
+    if std::env::var("INODE_SERVICE_DRY_RUN").is_ok_and(|v| v == "1") {
+        println!("[dry-run] sudo {}", args.join(" "));
+        return Ok(());
+    }
     let status = Command::new("sudo")
         .args(args)
         .status()

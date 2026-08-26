@@ -32,6 +32,15 @@
    ifconfig; netstat -rn -f inet; scutil --dns
    ```
 
+4. 可选：服务安装 dry-run（不 sudo、不写系统文件）：
+
+   ```sh
+   INODE_SERVICE_DRY_RUN=1 /tmp/inode-result/bin/inode enable --now
+   INODE_SERVICE_DRY_RUN=1 /tmp/inode-result/bin/inode disable --now
+   ```
+
+   确认打印的 unit/plist 路径与 sudo 命令符合预期后再真正安装。
+
 ---
 
 ## 1. Linux 真机（M3，验收 A31–A37）
