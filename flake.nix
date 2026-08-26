@@ -59,11 +59,13 @@
 
         craneLib = crane.mkLib pkgs;
 
-        inode = import ./nix/inode.nix {
+        inode-module = import ./nix/inode.nix {
           inherit pkgs craneLib;
           src = ./.;
           openconnect = inode-openconnect;
         };
+
+        inode = inode-module.package;
 
         inode-openconnect = import ./nix/openconnect-h3c-v921.nix {
           inherit pkgs;
@@ -88,6 +90,11 @@
             vpn-inode = vpn-inode;
           }
           // lib.optionalAttrs isDarwin {inherit vpn-watch;};
+
+        checks = {
+          inode-clippy = inode-module.clippy;
+          inode-fmt = inode-module.fmt;
+        };
 
         devShells.default = pkgs.mkShell {
           name = "inode-vpn";
