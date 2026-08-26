@@ -568,10 +568,10 @@ fn engine_run(shared: Arc<Shared>, config: Config, tun_script: Option<String>) {
         }
 
         let useragent = cstring("inode-vpn")?;
-        let progress_fn: oc::ProgressFn = Some(std::mem::transmute::<
-            unsafe extern "C" fn(*mut c_void, c_int, *const c_char, ...),
-            unsafe extern "C" fn(*mut c_void, c_int, *const c_char, ...),
-        >(oc::inode_oc_progress_shim));
+        let progress_fn: oc::ProgressFn = Some(
+            oc::inode_oc_progress_shim
+                as unsafe extern "C" fn(*mut c_void, c_int, *const c_char, ...),
+        );
         let vpninfo = oc::openconnect_vpninfo_new(
             useragent.as_ptr(),
             Some(validate_cb),
@@ -846,7 +846,7 @@ fn dispatch(shared: &Arc<Shared>, request: Request) -> Response {
         }
         "restart" => {
             shared.request_stop();
-            let _ = std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(std::time::Duration::from_millis(200));
             match load_config_for_daemon(shared) {
                 Ok(config) => match shared.engine_start(config) {
                     Ok(()) => Response::ok(request.id, serde_json::json!({"accepted": true})),
@@ -889,11 +889,7 @@ fn handle_client(shared: Arc<Shared>, stream: UnixStream) {
         let _ = stream.shutdown(std::net::Shutdown::Both);
         UnixStream::pair().unwrap().0
     }));
-    loop {
-        let line = match ipc::read_line(&mut reader) {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+    while let Ok(line) = ipc::read_line(&mut reader) {
         let line = line.trim();
         if line.is_empty() {
             continue;
