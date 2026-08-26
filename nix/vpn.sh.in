@@ -7,10 +7,17 @@ export PATH="$PATH:/usr/bin:/bin:/usr/sbin:/sbin"
 GATEWAY="${H3C_GATEWAY:-}"
 VPN_DIR="$HOME/.vpn"
 PID_FILE="$VPN_DIR/vpn-pid"
+START_PID_FILE="$VPN_DIR/start-pid"
 LOG_FILE="$VPN_DIR/vpn-log"
 DIR_FILE="$VPN_DIR/vpn-dir"
+DEBUG_LOG="/tmp/vpn-debug.log"                   # 临时诊断日志（排查后移除）
+
+debug_log() {
+    echo "[$(date '+%F %T')] $$ $*" >> "$DEBUG_LOG" 2>/dev/null || true
+}
 
 mkdir -p "$VPN_DIR"
+debug_log "init HOME=$HOME VPN_DIR=$VPN_DIR"
 @watchLink@
 
 # 安全兜底：symlink 断链或不存在时修复（不删已有有效 symlink，避免竞态）
@@ -34,10 +41,23 @@ MAX_LOG_SIZE=104857600  # 100MB
 
 # ===== 内部工具 =====
 
-# 以 ping 判断隧道是否真正连通（真实 IP 层可达性），
-# 避免"openconnect 进程还在但隧道已断/忙循环"的假阳性
+# 跨平台 ping：macOS 用 -t 表示超时秒；Linux 用 -W 表示超时秒。
+# 不加超时的话，Linux 上 ping 一个无响应的隧道内地址可能永久卡住。
+ping_once() {
+    local target="$1"
+    if [ "$(uname)" = "Darwin" ]; then
+        ping -c 1 -t 2 "$target" >/dev/null 2>&1
+    else
+        ping -c 1 -W 2 "$target" >/dev/null 2>&1
+    fi
+}
+
+# 判断 VPN 是否已建立：openconnect 进程存活，且日志里出现隧道配置成功标志。
+# 不再依赖 ping 特定内网地址，避免内网禁 ping 或探测地址不对时误杀已连上的 VPN。
 is_vpn_alive() {
-    ping -c 1 -t 2 "$PING_TARGET" >/dev/null 2>&1
+    pgrep -f "[o]penconnect" >/dev/null 2>&1 || return 1
+    [ -f "$LOG_FILE" ] || return 1
+    grep -qE "Configured as|Connected to|add net .*: gateway" "$LOG_FILE" 2>/dev/null
 }
 
 # 判断本机网络是否就绪（已拿到 IP + 有可达的默认路由）。
@@ -45,10 +65,10 @@ is_vpn_alive() {
 is_network_ready() {
     local gw
     gw=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')
-    if [ -n "$gw" ] && ping -c 1 -t 2 "$gw" >/dev/null 2>&1; then
+    if [ -n "$gw" ] && ping_once "$gw"; then
         return 0
     fi
-    ping -c 1 -t 2 "$NET_PROBE" >/dev/null 2>&1
+    ping_once "$NET_PROBE"
 }
 
 # 日志护栏：超过 100MB 截断保留尾部
@@ -72,6 +92,22 @@ refresh_self_link() {
     self_path="$self_dir/$(basename "$0")"
     if [ "$self_path" != "$VPN_DIR/vpn" ]; then
         ln -sf "$self_path" "$VPN_DIR/vpn"
+    fi
+}
+
+# 清理可能并发的旧 start 进程。
+# 注意：不要用 pkill -f "[v]pn.*start"，在 Linux 上会匹配当前 vpn start 自身
+# 或 SSH 命令行里的 "vpn start"，导致启动脚本自杀/会话被 kill。
+# 这里只用 start-pid 记录来清理，避免误杀 timeout/ssh 等只是“提到”vpn start 的进程，
+# 同时兼容 macOS/Linux。
+kill_other_starts() {
+    if [ -f "$START_PID_FILE" ]; then
+        local old_pid
+        old_pid="$(cat "$START_PID_FILE" 2>/dev/null || true)"
+        if [ -n "$old_pid" ] && [ "$old_pid" != "$$" ] && kill -0 "$old_pid" 2>/dev/null; then
+            kill "$old_pid" 2>/dev/null || true
+        fi
+        rm -f "$START_PID_FILE"
     fi
 }
 
@@ -101,6 +137,50 @@ clean_stale_gateway_route() {
     sudo route delete -host "$host" >/dev/null 2>&1 || true
 }
 
+# 获取默认网关 / 默认接口 / 本机 IP，兼容 macOS 与 Linux。
+get_default_gateway() {
+    if [ "$(uname)" = "Darwin" ]; then
+        route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}'
+    else
+        ip route show default 2>/dev/null | awk '/default/{print $3; exit}'
+    fi
+}
+
+get_default_iface() {
+    if [ "$(uname)" = "Darwin" ]; then
+        route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}'
+    else
+        ip route show default 2>/dev/null | awk '/default/{print $5; exit}'
+    fi
+}
+
+get_local_ip() {
+    local iface
+    iface="$(get_default_iface)"
+    [ -n "$iface" ] || return 0
+    if [ "$(uname)" = "Darwin" ]; then
+        ifconfig "$iface" 2>/dev/null | awk '/inet /{print $2; exit}'
+    else
+        ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1
+    fi
+}
+
+# 防止 VPN 把本地局域网路由抢走导致 SSH/局域网失联：
+# 在 VPN 建立后，给本机 IP 加一条更精确的主机路由，仍走原默认网关。
+protect_local_route() {
+    local gw iface ip
+    gw="$(get_default_gateway)"
+    iface="$(get_default_iface)"
+    ip="$(get_local_ip)"
+    [ -n "$gw" ] && [ -n "$ip" ] || return 0
+    if [ "$(uname)" = "Darwin" ]; then
+        sudo route add -host "$ip" "$gw" >/dev/null 2>&1 || true
+    else
+        sudo ip route add "$ip/32" via "$gw" dev "$iface" >/dev/null 2>&1 || \
+        sudo route add -host "$ip" gw "$gw" >/dev/null 2>&1 || true
+    fi
+}
+
 # 仿 systemd 用法：首个参数为子命令，其余参数透传
 CMD="${1:-}"
 if [ "$#" -gt 0 ]; then shift; fi
@@ -114,7 +194,7 @@ usage() {
     echo "  status            查看连接与守护服务状态" >&2
     echo "  enable [--now]    安装开盖唤醒/掉线自动重连服务（macOS）；--now 同时立即连接" >&2
     echo "  disable [--now]   移除自动重连服务；--now 同时立即断开" >&2
-    echo "  install-sudoers   写入 openconnect 的 sudo 免密规则（macOS，一次性）" >&2
+    echo "  install-sudoers   写入 openconnect 的 sudo 免密规则（macOS/Linux，一次性）" >&2
     echo "  uninstall-sudoers 移除 sudo 免密规则" >&2
 }
 
@@ -261,21 +341,29 @@ if [ "$CMD" = "status" ]; then
     exit "$RC"
 fi
 
-# install-sudoers：写入 openconnect / kill / pkill 的 sudo 免密规则，
-# 使守护重连无需交互输入 sudo 密码（首次写入需一次 sudo 授权）
+# install-sudoers：写入 openconnect / kill / pkill / route 的 sudo 免密规则，
+# 使守护重连无需交互输入 sudo 密码（首次写入需一次 sudo 授权）。
+# 同时兼容 macOS 与 Linux：按平台选择命令路径和 sudoers 文件属组。
 if [ "$CMD" = "install-sudoers" ]; then
-    if [ "$(uname)" != "Darwin" ]; then
-        echo "install-sudoers 目前仅适配 macOS 命令路径" >&2
-        exit 1
-    fi
     USER_NAME=$(id -un)
     TMP=$(mktemp)
+    if [ "$(uname)" = "Darwin" ]; then
+        SUDOERS_GROUP="wheel"
+        KILL_CMD="/bin/kill"
+        PKILL_CMD="/usr/bin/pkill"
+        ROUTE_CMD="/sbin/route"
+    else
+        SUDOERS_GROUP="root"
+        KILL_CMD="$(command -v kill 2>/dev/null || echo /bin/kill)"
+        PKILL_CMD="$(command -v pkill 2>/dev/null || echo /usr/bin/pkill)"
+        ROUTE_CMD="$(command -v route 2>/dev/null || echo /sbin/route)"
+    fi
     {
         echo "# openconnect-h3c VPN 免密规则，由 vpn install-sudoers 生成"
-        # /sbin/route 免密是关键：clean_stale_gateway_route 需删残留网关主机路由，
-        # 否则 launchd 无 tty / 手动时 prompt 被吞 → 删除静默失败 → 换网段后脏路由
+        # route 免密是关键：clean_stale_gateway_route 需删残留网关主机路由，
+        # 否则无 tty / 手动时 prompt 被吞 → 删除静默失败 → 换网段后脏路由
         # 遗留、connect() 报 EADDRNOTAVAIL，且重启系统前无法自愈。
-        echo "$USER_NAME ALL=(root) NOPASSWD: /nix/store/*/bin/openconnect, /bin/kill, /usr/bin/pkill, /sbin/route"
+        echo "$USER_NAME ALL=(root) NOPASSWD: /nix/store/*/bin/openconnect, $KILL_CMD, $PKILL_CMD, $ROUTE_CMD"
     } > "$TMP"
     if ! visudo -c -f "$TMP" >/dev/null; then
         echo "sudoers 语法校验失败，未写入" >&2
@@ -284,7 +372,7 @@ if [ "$CMD" = "install-sudoers" ]; then
     fi
     echo "即将写入 /etc/sudoers.d/vpn（需要一次 sudo 授权）："
     sed 's/^/  /' "$TMP"
-    sudo install -m 0440 -o root -g wheel "$TMP" /etc/sudoers.d/vpn
+    sudo install -m 0440 -o root -g "$SUDOERS_GROUP" "$TMP" /etc/sudoers.d/vpn
     rm -f "$TMP"
     echo "已安装 sudo 免密规则"
     exit 0
@@ -303,8 +391,12 @@ if [ -f "$AUTH_FILE" ]; then
     PASSWORD=$(auth_val password)
     SERVERCERT=$(auth_val servercert)
     AUTH_GATEWAY=$(auth_val gateway)
+    AUTH_PING_TARGET=$(auth_val ping_target)
     if [ -n "${AUTH_GATEWAY:-}" ]; then
         GATEWAY="$AUTH_GATEWAY"
+    fi
+    if [ -n "${AUTH_PING_TARGET:-}" ]; then
+        PING_TARGET="$AUTH_PING_TARGET"
     fi
 fi
 
@@ -312,8 +404,8 @@ fi
 # supervise 见无目标则空转，不会与用户对抗把连接拉回。
 if [ "$CMD" = "stop" ]; then
     rm -f "$DIR_FILE"
-    # [v] 技巧防止 pkill 匹配自身；杀掉正在进行的 start（含 reconnect 触发的）
-    pkill -f "[v]pn.*start" 2>/dev/null || true
+    # 杀掉正在进行的 start（含 reconnect 触发的），避免 pkill 自杀
+    kill_other_starts
     # 优雅终止 openconnect，让它自行删除网关主机路由+拆 tun；卡死才 -9 兜底
     graceful_kill_openconnect
     # 兜底：万一 teardown 没跑成，主动清掉残留的网关主机路由
@@ -346,8 +438,10 @@ log_guard
 # 维护家目录下的稳定入口（绝对路径），仅在 start 时强制刷新
 refresh_self_link
 
-# [v] 技巧防止 pkill 匹配自身：清掉可能并行的旧 start
-pkill -f "[v]pn.*start" 2>/dev/null || true
+# 清掉可能并行的旧 start（安全版，不会自杀）
+kill_other_starts
+echo $$ > "$START_PID_FILE"
+trap 'rm -f "$START_PID_FILE"' EXIT
 
 OPENCONNECT="@openconnect@/bin/openconnect"
 
@@ -382,33 +476,44 @@ if [ -f "$AUTH_FILE" ]; then
     fi
 
     # 先优雅停掉残留 openconnect（让其 teardown 删路由），卡死再 -9
+    debug_log "before graceful_kill"
     graceful_kill_openconnect
+    debug_log "after graceful_kill"
     # 兜底：清掉上一轮 -9/睡眠卡死遗留的网关主机路由，否则本次 connect()
     # 会被脏路由送往不可达的旧网关 → Can't assign requested address
+    debug_log "before clean_stale"
     clean_stale_gateway_route
+    debug_log "after clean_stale"
     rm -f "$PID_FILE"
 
+    debug_log "launching openconnect"
     printf "%s\n" "$PASSWORD" | \
         sudo "$OPENCONNECT" --protocol=h3c --passwd-on-stdin --no-dtls "${CERT_ARG[@]}" "$GATEWAY" -u "$USERNAME" "$@" > "$LOG_FILE" 2>&1 &
     PID=$!
     echo "$PID" > "$PID_FILE"
+    debug_log "launched pid=$PID log=$LOG_FILE"
 
     # 等待并 ping 验证隧道真正可用（最多等 ~13s）
     sleep 3
     CONNECTED=0
     for i in 1 2 3 4 5; do
+        debug_log "loop $i"
+        # VPN 起来后可能把本地局域网路由抢走，先补一条本机 IP 的主机路由，
+        # 避免 SSH/局域网在连接过程中失联。
+        protect_local_route
         if is_vpn_alive; then
             CONNECTED=1
             break
         fi
         sleep 2
     done
+    debug_log "loop done connected=$CONNECTED"
 
     if [ "$CONNECTED" = "1" ]; then
         echo "$PWD" > "$DIR_FILE"
         echo "VPN 已连接 (pid $PID)"
     else
-        echo "VPN 启动失败（进程存活但 ping $PING_TARGET 不通）"
+        echo "VPN 启动失败（openconnect 进程存活但未确认隧道配置成功）"
         echo "最后几行日志："
         tail -n 5 "$LOG_FILE"
         if kill -0 "$PID" 2>/dev/null; then

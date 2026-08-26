@@ -503,13 +503,41 @@ fn engine_run(shared: Arc<Shared>, config: Config, tun_script: Option<String>) {
         }
         shared.set_connected_info(config.gateway.url.clone(), session);
 
+        // Routectl configuration travels through the process environment and
+        // is inherited by the fork's /bin/sh -c child.
+        std::env::set_var(
+            "INODE_DNS_MODE",
+            match config.network.dns {
+                inode_core::config::DnsMode::Server => "server",
+                inode_core::config::DnsMode::Ignore => "ignore",
+            },
+        );
+        if !config.network.preserve_cidrs.is_empty() {
+            std::env::set_var(
+                "INODE_PRESERVE_CIDRS",
+                config.network.preserve_cidrs.join(","),
+            );
+        }
+        if std::env::var_os("INODE_ROUTECTL_STATE_DIR").is_none() {
+            std::env::set_var("INODE_ROUTECTL_STATE_DIR", "/run/inode-vpn");
+        }
+
         if !ctx.tun_script.as_bytes().is_empty() {
             ret = oc::openconnect_setup_tun_script(vpninfo, ctx.tun_script.as_ptr());
         } else {
-            // Production path. Route/DNS work lands in M3 (inode-routectl).
-            let empty_script = cstring("")?;
-            ret =
-                oc::openconnect_setup_tun_device(vpninfo, empty_script.as_ptr(), std::ptr::null());
+            // Production path: let the fork exec inode-routectl for
+            // connect/reconnect/disconnect. Prefer the binary next to the
+            // daemon (Nix puts all three in the same bin dir).
+            let routectl = std::env::var_os("INODE_ROUTECTL")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.join("inode-routectl")))
+                })
+                .ok_or_else(|| Error::OpenConnect("cannot locate inode-routectl".into()))?;
+            let script = cstring(routectl.to_string_lossy().as_ref())?;
+            ret = oc::openconnect_setup_tun_device(vpninfo, script.as_ptr(), std::ptr::null());
         }
         tracing::info!("engine: tun setup");
         if ret != 0 {

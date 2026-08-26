@@ -9,6 +9,8 @@ use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
+mod service;
+
 #[derive(Debug, Parser)]
 #[command(name = "inode", version, about = "H3C SSL VPN client (inode-vpn)")]
 struct Cli {
@@ -186,13 +188,45 @@ fn main() {
                 },
             }
         }
-        Command::Logs { .. } | Command::Diagnose => {
-            eprintln!("not implemented yet (planned in M3/M5)");
+        Command::Logs { follow } => {
+            #[cfg(target_os = "linux")]
+            {
+                if let Err(e) = service::logs(euid(), follow) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = follow;
+                eprintln!("logs on macOS lands in M4");
+                std::process::exit(1);
+            }
+        }
+        Command::Diagnose => {
+            eprintln!("not implemented yet (planned in M5)");
             std::process::exit(1);
         }
-        Command::Enable { .. } | Command::Disable { .. } => {
-            eprintln!("service installation lands in M3 (Linux) / M4 (macOS)");
-            std::process::exit(1);
+        ref command @ (Command::Enable { now } | Command::Disable { now }) => {
+            #[cfg(target_os = "linux")]
+            {
+                let result = match command {
+                    Command::Enable { .. } => service::enable(euid(), now),
+                    Command::Disable { .. } => service::disable(euid(), now),
+                    _ => unreachable!(),
+                };
+                if let Err(e) = result {
+                    eprintln!("service operation failed: {e}");
+                    std::process::exit(1);
+                }
+                println!("service operation complete");
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = now;
+                eprintln!("service installation lands in M4 on macOS");
+                std::process::exit(1);
+            }
         }
         Command::Config(cmd) => match cmd {
             ConfigCommand::Show => {

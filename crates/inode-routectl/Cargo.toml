@@ -16,4 +16,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 inode-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true

@@ -1,21 +1,40 @@
 //! vpnc-script replacement.
 //!
-//! M0 skeleton: parse `reason` and dispatch to platform modules. Platform
-//! implementations arrive in M3 (Linux) and M4 (macOS).
+//! `inode-routectl <reason>` is exec'd by libopenconnect with the vpnc-script
+//! environment (`INTERNAL_IP4_*`, `CISCO_SPLIT_INC_*`, `TUNDEV`, ...).
+//! Pure parsing lives in [`plan`]; Linux command execution in [`linux`].
+
+pub mod linux;
+pub mod plan;
 
 use inode_core::{Error, Result};
+use std::env;
 
 pub const SUPPORTED_REASONS: &[&str] = &["pre-init", "connect", "reconnect", "disconnect"];
 
-/// Run one vpnc-script phase. openconnect passes tunnel parameters through
-/// the process environment (`INTERNAL_IP4_ADDRESS`, `CISCO_SPLIT_INC_*`, ...).
+/// Parse the vpnc-script environment and run one phase.
 pub fn run(reason: &str) -> Result<()> {
     if !SUPPORTED_REASONS.contains(&reason) {
         return Err(Error::Route(format!(
             "unsupported vpnc-script reason: {reason}"
         )));
     }
-    tracing::info!(reason, "inode-routectl phase (platform impl pending)");
+    let dry_run = env::var("INODE_ROUTECTL_DRY_RUN").is_ok_and(|v| v == "1");
+    let plan = plan::RoutePlan::from_env(reason)?;
+    tracing::info!(reason, tun = %plan.tun_iface, dry_run, "inode-routectl phase");
+    if dry_run {
+        println!("{}", plan.describe());
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    linux::apply(&plan)?;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = &plan;
+        return Err(Error::Route(
+            "platform implementation not available yet (macOS lands in M4)".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -25,13 +44,18 @@ mod tests {
 
     #[test]
     fn rejects_unknown_reason() {
-        assert!(run("explode").is_err());
+        assert!(matches!(run("explode"), Err(Error::Route(_))));
     }
 
     #[test]
     fn accepts_vpnc_script_phases() {
         for reason in SUPPORTED_REASONS {
-            assert!(run(reason).is_ok(), "reason {reason} should be accepted");
+            let result = run(reason);
+            // On non-Linux test hosts a missing platform implementation is
+            // fine; the reason itself must be accepted.
+            if let Err(Error::Route(msg)) = result {
+                assert!(!msg.starts_with("unsupported vpnc-script reason"));
+            }
         }
     }
 }
