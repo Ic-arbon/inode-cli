@@ -91,15 +91,21 @@ fn sudo(args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// Create `/var/lib/inode-vpn/current -> <dir containing inode-vpnd>` so the
-/// unit never references a GC-able /nix/store path.
+fn stable_root_for(exec: &Path) -> Result<&Path, String> {
+    exec.parent()
+        .ok_or_else(|| format!("executable path has no parent: {}", exec.display()))
+}
+
+/// Create `/var/lib/inode-vpn/current -> <package root containing bin/>` so
+/// the unit's `/var/lib/inode-vpn/current/bin/inode-vpnd` stays stable and
+/// never references a GC-able /nix/store path.
 pub fn install_stable_link(exec: &Path) -> Result<(), String> {
-    let bin_dir = exec.to_path_buf();
+    let root_dir = stable_root_for(exec)?;
     sudo(&["mkdir", "-p", "/var/lib/inode-vpn"])?;
     sudo(&[
         "ln",
         "-sfn",
-        bin_dir.to_str().ok_or("non-UTF8 exec path")?,
+        root_dir.to_str().ok_or("non-UTF8 exec path")?,
         "/var/lib/inode-vpn/current",
     ])
 }
@@ -272,6 +278,17 @@ mod tests {
             Some(v) => std::env::set_var("INODE_SERVICE_UID", v),
             None => std::env::remove_var("INODE_SERVICE_UID"),
         }
+    }
+
+    #[test]
+    fn stable_link_targets_package_root() {
+        // stable_exec_path() yields the directory containing the binary.
+        let bin_dir = Path::new("/nix/store/x-inode-0.1.0/bin");
+        assert_eq!(
+            stable_root_for(bin_dir).unwrap(),
+            Path::new("/nix/store/x-inode-0.1.0")
+        );
+        assert!(stable_root_for(Path::new("/")).is_err());
     }
 
     #[cfg(target_os = "macos")]
