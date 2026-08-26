@@ -84,6 +84,7 @@ inode start
 inode stop
 inode restart
 inode status [--json]      # exit: 0=Connected, 3=Stopped, 1=Failed
+inode discover-cert [--force]  # TOFU 获取/更新 pin-sha256 (SPKI)
 inode logs [-f]
 inode enable [--now]       # Linux: systemd unit；macOS: LaunchDaemon
 inode disable [--now]
@@ -112,5 +113,4 @@ inode diagnose             # 脱敏诊断包
 ## 已知待办
 
 - Linux/macOS 真机验收矩阵（见开发计划 A31–A40）。
-- `inode discover-cert` 与 `config set` 尚未实现。
 - macOS DNS 服务名发现待补。
