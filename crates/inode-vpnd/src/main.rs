@@ -974,6 +974,30 @@ fn state_file_for(config_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("state.json"))
 }
 
+/// Resolve the config file for the target user.
+///
+/// The daemon itself runs as root (systemd `User=root` / LaunchDaemon), so
+/// `Config::default_path()` would read `$HOME` (i.e. `/root`) and never find
+/// the invoking user's credentials. When `--uid` differs from our euid, ask
+/// the account database for that user's home directory instead.
+fn default_config_path_for(uid: u32) -> PathBuf {
+    if uid == unsafe { libc::geteuid() } {
+        if let Ok(path) = Config::default_path() {
+            return path;
+        }
+    } else {
+        let pw = unsafe { libc::getpwuid(uid) };
+        if !pw.is_null() {
+            let home = unsafe { CStr::from_ptr((*pw).pw_dir) };
+            return PathBuf::from(home.to_string_lossy().as_ref())
+                .join(".config")
+                .join("inode-vpn")
+                .join("config.toml");
+        }
+    }
+    PathBuf::from("config.toml")
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -994,10 +1018,10 @@ async fn main() {
     let config_path = cli
         .config
         .clone()
-        .or_else(|| Config::default_path().ok())
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
+        .unwrap_or_else(|| default_config_path_for(uid));
     let socket_path = cli.socket.clone().unwrap_or_else(|| ipc::socket_path(uid));
 
+    tracing::info!(uid, config = %config_path.display(), "daemon starting");
     let shared = Shared::new(uid, gid, config_path.clone(), cli.tun_script.clone());
     let shared_ipc = Arc::new(shared.clone());
 
