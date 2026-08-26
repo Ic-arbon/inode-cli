@@ -2,9 +2,10 @@
 //!
 //! `inode-routectl <reason>` is exec'd by libopenconnect with the vpnc-script
 //! environment (`INTERNAL_IP4_*`, `CISCO_SPLIT_INC_*`, `TUNDEV`, ...).
-//! Pure parsing lives in [`plan`]; Linux command execution in [`linux`].
+//! Pure parsing lives in [`plan`]; platform executors in [`linux`]/[`macos`].
 
 pub mod linux;
+pub mod macos;
 pub mod plan;
 
 use inode_core::{Error, Result};
@@ -28,12 +29,12 @@ pub fn run(reason: &str) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     linux::apply(&plan)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    macos::apply(&plan)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = &plan;
-        return Err(Error::Route(
-            "platform implementation not available yet (macOS lands in M4)".into(),
-        ));
+        return Err(Error::Route("unsupported platform".into()));
     }
     Ok(())
 }

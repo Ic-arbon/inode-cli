@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const UNIT_NAME: &str = "inode-vpnd@";
 
 pub fn euid() -> u32 {
@@ -73,6 +74,7 @@ pub fn install_stable_link(exec: &Path) -> Result<(), String> {
     ])
 }
 
+#[cfg(target_os = "linux")]
 pub fn enable(uid: u32, now: bool) -> Result<(), String> {
     let bin_dir = stable_exec_path()?;
     install_stable_link(&bin_dir)?;
@@ -99,6 +101,7 @@ pub fn enable(uid: u32, now: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub fn disable(uid: u32, now: bool) -> Result<(), String> {
     let unit = unit_name_for(uid);
     if now {
@@ -111,6 +114,73 @@ pub fn disable(uid: u32, now: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub const LAUNCHD_LABEL: &str = "cc.inode.vpn-daemon";
+#[cfg(target_os = "macos")]
+pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/cc.inode.vpn-daemon.plist";
+
+#[cfg(target_os = "macos")]
+pub fn plist_text(uid: u32, exec: &Path) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exec}</string>
+    <string>--uid</string><string>{uid}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/var/log/inode-vpn.log</string>
+  <key>StandardErrorPath</key><string>/var/log/inode-vpn.err</string>
+</dict></plist>
+"#,
+        label = LAUNCHD_LABEL,
+        exec = exec.display()
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn enable(uid: u32, now: bool) -> Result<(), String> {
+    let bin_dir = stable_exec_path()?;
+    install_stable_link(&bin_dir)?;
+    let exec = PathBuf::from("/var/lib/inode-vpn/current/bin/inode-vpnd");
+    let plist = plist_text(uid, &exec);
+
+    let tmp = std::env::temp_dir().join(format!("{LAUNCHD_LABEL}.plist"));
+    std::fs::write(&tmp, plist).map_err(|e| e.to_string())?;
+    sudo(&[
+        "install",
+        "-m",
+        "0644",
+        tmp.to_str().ok_or("bad tmp path")?,
+        LAUNCHD_PLIST,
+    ])?;
+    let _ = std::fs::remove_file(tmp);
+    let _ = sudo(&["launchctl", "bootout", &format!("system/{LAUNCHD_LABEL}")]);
+    sudo(&["launchctl", "bootstrap", "system", LAUNCHD_PLIST])?;
+    if now {
+        sudo(&[
+            "launchctl",
+            "kickstart",
+            "-k",
+            &format!("system/{LAUNCHD_LABEL}"),
+        ])?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn disable(_uid: u32, now: bool) -> Result<(), String> {
+    if now {
+        let _ = sudo(&["launchctl", "bootout", &format!("system/{LAUNCHD_LABEL}")]);
+    }
+    sudo(&["rm", "-f", LAUNCHD_PLIST])
+}
+
+#[cfg(target_os = "linux")]
 pub fn logs(uid: u32, follow: bool) -> Result<(), String> {
     let unit = unit_name_for(uid);
     let mut cmd = Command::new("journalctl");
@@ -126,6 +196,24 @@ pub fn logs(uid: u32, follow: bool) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn logs(_uid: u32, follow: bool) -> Result<(), String> {
+    let mut cmd = Command::new("tail");
+    if follow {
+        cmd.arg("-f");
+    } else {
+        cmd.arg("-n").arg("100");
+    }
+    cmd.arg("/var/log/inode-vpn.log")
+        .arg("/var/log/inode-vpn.err");
+    let status = cmd.status().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("tail exited {status}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +226,14 @@ mod tests {
         assert!(text.contains("Restart=always"));
         assert!(text.contains("RuntimeDirectory=inode-vpn"));
         assert!(text.contains("WantedBy=multi-user.target"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn plist_contains_stable_contract() {
+        let text = plist_text(501, Path::new("/var/lib/inode-vpn/current/bin/inode-vpnd"));
+        assert!(text.contains("<key>Label</key><string>cc.inode.vpn-daemon</string>"));
+        assert!(text.contains("<string>/var/lib/inode-vpn/current/bin/inode-vpnd</string>"));
+        assert!(text.contains("<key>KeepAlive</key><true/>"));
     }
 }

@@ -189,17 +189,17 @@ fn main() {
             }
         }
         Command::Logs { follow } => {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 if let Err(e) = service::logs(euid(), follow) {
                     eprintln!("{e}");
                     std::process::exit(1);
                 }
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = follow;
-                eprintln!("logs on macOS lands in M4");
+                eprintln!("logs are unsupported on this platform");
                 std::process::exit(1);
             }
         }
@@ -208,7 +208,7 @@ fn main() {
             std::process::exit(1);
         }
         ref command @ (Command::Enable { now } | Command::Disable { now }) => {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 let result = match command {
                     Command::Enable { .. } => service::enable(euid(), now),
@@ -221,10 +221,10 @@ fn main() {
                 }
                 println!("service operation complete");
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = now;
-                eprintln!("service installation lands in M4 on macOS");
+                eprintln!("service installation is unsupported on this platform");
                 std::process::exit(1);
             }
         }

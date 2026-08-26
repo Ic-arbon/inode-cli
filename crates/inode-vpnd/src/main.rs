@@ -17,7 +17,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+mod netwatch;
 
 #[derive(Debug, Parser)]
 #[command(name = "inode-vpnd", version, about = "inode-vpn root daemon")]
@@ -63,6 +65,7 @@ struct Inner {
     target_uid: u32,
     target_gid: u32,
     stop_requested: bool,
+    last_net_event: Option<Instant>,
     cmd_fd: Option<RawFd>,
     engine: Option<JoinHandle<()>>,
     tun_script: Option<String>,
@@ -88,6 +91,7 @@ impl Shared {
                 target_uid,
                 target_gid,
                 stop_requested: false,
+                last_net_event: None,
                 cmd_fd: None,
                 engine: None,
                 tun_script,
@@ -184,6 +188,41 @@ impl Shared {
             unsafe {
                 libc::write(fd, byte.as_ptr() as *const c_void, 1);
             }
+        }
+    }
+
+    /// Network-change trigger: PAUSE the mainloop so the engine reconnects
+    /// on the same cookie. Debounced to collapse `ip monitor` bursts.
+    fn network_changed(&self) {
+        let (should_pause, cmd_fd) = {
+            let mut inner = self.inner.lock().unwrap();
+            let now = Instant::now();
+            if inner
+                .last_net_event
+                .map(|t| now.duration_since(t).as_secs() < 2)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            if !matches!(
+                inner.state,
+                SessionState::Connected | SessionState::Reconnecting
+            ) || inner.cmd_fd.is_none()
+            {
+                return;
+            }
+            inner.last_net_event = Some(now);
+            (true, inner.cmd_fd)
+        };
+        if should_pause {
+            self.set_state(SessionState::Reconnecting, None);
+            if let Some(fd) = cmd_fd {
+                let byte = [oc::OC_CMD_PAUSE];
+                unsafe {
+                    libc::write(fd, byte.as_ptr() as *const c_void, 1);
+                }
+            }
+            tracing::info!("network change detected; reconnecting");
         }
     }
 
@@ -554,7 +593,14 @@ fn engine_run(shared: Arc<Shared>, config: Config, tun_script: Option<String>) {
                 break;
             }
             if r == 0 {
-                continue; // PAUSE without quit
+                // OC_CMD_PAUSE (network change watcher) closes the data
+                // connection; the next mainloop call reconnects.
+                if shared.stop_requested() {
+                    shared.set_state(SessionState::Stopped, None);
+                    break;
+                }
+                shared.set_state(SessionState::Reconnecting, None);
+                continue;
             }
             return Err(Error::OpenConnect(format!("mainloop exited ({r})")));
         }
@@ -814,6 +860,8 @@ async fn main() {
             }
         })
     };
+
+    let _netwatch_thread = netwatch::spawn(Arc::clone(&shared_ipc));
 
     // Wait for shutdown signals, then request a clean stop.
     #[cfg(unix)]
