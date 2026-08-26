@@ -64,6 +64,12 @@ enum Command {
     Config(ConfigCommand),
     /// Produce a redacted diagnostic bundle (M5).
     Diagnose,
+    /// Discover the gateway certificate pin (TOFU, pin-sha256 = SPKI hash).
+    DiscoverCert {
+        /// Allow replacing an existing, different pin.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -139,6 +145,115 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     ))
+}
+
+fn locate_openconnect() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("INODE_OPENCONNECT_BIN") {
+        let p = PathBuf::from(path);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("openconnect-h3c");
+            if bundled.is_file() {
+                return Some(bundled);
+            }
+        }
+    }
+    let in_path = PathBuf::from("openconnect");
+    if in_path.is_file() {
+        return Some(in_path);
+    }
+    None
+}
+
+fn parse_pin(output: &str) -> Option<String> {
+    const PREFIX: &str = "pin-sha256:";
+    let idx = output.find(PREFIX)?;
+    let rest = &output[idx + PREFIX.len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '/' && c != '=')
+        .unwrap_or(rest.len());
+    let pin = &rest[..end];
+    if pin.len() >= 20 {
+        Some(format!("{PREFIX}{pin}"))
+    } else {
+        None
+    }
+}
+
+fn run_discover_cert(force: bool) -> i32 {
+    let Some(bin) = locate_openconnect() else {
+        eprintln!(
+            "cannot locate openconnect-h3c binary; set INODE_OPENCONNECT_BIN or install the fork"
+        );
+        return 1;
+    };
+    let config_path = match Config::default_path() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let mut cfg = match Config::load(&config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+
+    let mut child = match std::process::Command::new(&bin)
+        .args(["--protocol", "h3c", "--no-dtls", &cfg.gateway.url])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed to spawn {}: {e}", bin.display());
+            return 1;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(b"no\n");
+    }
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("openconnect failed: {e}");
+            return 1;
+        }
+    };
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let Some(pin) = parse_pin(&text) else {
+        eprintln!("no pin-sha256 found in openconnect output");
+        return 1;
+    };
+
+    if !cfg.gateway.servercert.is_empty() && cfg.gateway.servercert != pin && !force {
+        eprintln!(
+            "certificate pin changed\n  configured: {}\n  discovered: {pin}\nre-run with --force to accept the new pin",
+            cfg.gateway.servercert
+        );
+        return 1;
+    }
+    cfg.gateway.servercert = pin.clone();
+    if let Err(e) = cfg.save(&config_path) {
+        eprintln!("{e}");
+        return 1;
+    }
+    println!("discovered and saved {pin}");
+    0
 }
 
 /// Redacted diagnostic bundle. Never includes password/cookie values.
@@ -272,6 +387,9 @@ fn main() {
         Command::Diagnose => {
             std::process::exit(run_diagnose(cli.socket.clone(), cli.timeout_ms));
         }
+        Command::DiscoverCert { force } => {
+            std::process::exit(run_discover_cert(force));
+        }
         ref command @ (Command::Enable { now } | Command::Disable { now }) => {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
@@ -306,9 +424,24 @@ fn main() {
                     }
                 }
             }
-            ConfigCommand::Set { .. } => {
-                eprintln!("`config set` not implemented yet; edit the TOML file manually");
-                std::process::exit(1);
+            ConfigCommand::Set { key, value } => {
+                let path = Config::default_path().unwrap_or_else(|_| PathBuf::from("config.toml"));
+                let mut cfg = match Config::load(&path) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                };
+                if let Err(e) = cfg.with_key_set(&key, &value) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                if let Err(e) = cfg.save(&path) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("set {key} (secrets not displayed)");
             }
             ConfigCommand::Migrate => {
                 let auth = std::env::current_dir()

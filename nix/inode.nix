@@ -18,6 +18,10 @@ in
 
     buildInputs = [openconnect];
 
+    postInstall = ''
+      ln -s ${openconnect}/bin/openconnect "$out/bin/openconnect-h3c"
+    '';
+
     env = {
       OPENCONNECT_H3C_LIB = "${openconnect}";
       OPENCONNECT_H3C_INCLUDE = "${openconnect.dev}";

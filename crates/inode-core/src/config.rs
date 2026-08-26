@@ -175,6 +175,53 @@ impl Config {
         Ok(())
     }
 
+    /// Serialize to `path` with mode 0600.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| Error::Config(format!("failed to serialize config: {e}")))?;
+        Self::save_private(path, &text)
+    }
+
+    /// Update a whitelisted scalar key. Keeps the file interface narrow and
+    /// avoids accepting arbitrary TOML writes from the CLI.
+    pub fn with_key_set(&mut self, key: &str, value: &str) -> Result<()> {
+        match key {
+            "gateway.url" => self.gateway.url = value.to_string(),
+            "servercert" => self.gateway.servercert = value.to_string(),
+            "username" => self.credentials.username = value.to_string(),
+            "password" => self.credentials.password = value.to_string(),
+            "keepalive" => {
+                self.network.keepalive = if value == "auto" {
+                    Keepalive::Auto("auto".into())
+                } else {
+                    let secs = value.parse::<u64>().map_err(|_| {
+                        Error::Config(format!("keepalive must be 'auto' or seconds: {value}"))
+                    })?;
+                    Keepalive::Seconds(secs)
+                }
+            }
+            "dns" => {
+                self.network.dns = match value {
+                    "server" => DnsMode::Server,
+                    "ignore" => DnsMode::Ignore,
+                    other => {
+                        return Err(Error::Config(format!("dns must be server|ignore: {other}")))
+                    }
+                }
+            }
+            "preserve_cidrs" => {
+                self.network.preserve_cidrs = value
+                    .split([',', ';'])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }
+            other => return Err(Error::Config(format!("unsupported config key: {other}"))),
+        }
+        Ok(())
+    }
+
     /// Migrate a legacy `.auth` key=value file to the TOML config.
     ///
     /// `ping_target` is intentionally ignored: liveness no longer uses ping.
@@ -284,5 +331,27 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(Config::load(&path).is_err());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn with_key_set_whitelists_keys() {
+        let mut cfg = Config::default();
+        cfg.with_key_set("gateway.url", "vpn.example.com:2000")
+            .unwrap();
+        cfg.with_key_set("username", "alice").unwrap();
+        cfg.with_key_set("password", "s3cret").unwrap();
+        cfg.with_key_set("keepalive", "45").unwrap();
+        cfg.with_key_set("dns", "ignore").unwrap();
+        cfg.with_key_set("preserve_cidrs", "192.168.0.0/23,10.0.0.0/8")
+            .unwrap();
+        assert_eq!(cfg.gateway.url, "vpn.example.com:2000");
+        assert_eq!(cfg.credentials.password, "s3cret");
+        assert_eq!(cfg.network.keepalive, Keepalive::Seconds(45));
+        assert_eq!(cfg.network.dns, DnsMode::Ignore);
+        assert_eq!(
+            cfg.network.preserve_cidrs,
+            vec!["192.168.0.0/23", "10.0.0.0/8"]
+        );
+        assert!(cfg.with_key_set("nonsense", "x").is_err());
     }
 }
