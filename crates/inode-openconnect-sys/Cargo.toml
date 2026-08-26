@@ -5,9 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Link against libopenconnect-h3c. Set OPENCONNECT_H3C_DEV to the dev
+# output of the fork (must contain lib/libopenconnect.{so,dylib}).
+ffi = []
+
 [lib]
 name = "inode_openconnect_sys"
 path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
 
 [dependencies]
 libc.workspace = true

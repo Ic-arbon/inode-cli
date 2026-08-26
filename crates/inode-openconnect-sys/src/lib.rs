@@ -8,6 +8,9 @@
 pub const OPENCONNECT_API_VERSION_MAJOR: u32 = 5;
 pub const OPENCONNECT_API_VERSION_MINOR: u32 = 8;
 
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 /// Maximum accepted H3C frame payload length, matching the fork's
 /// `H3C_MAX_FRAME_LEN`.
 pub const H3C_MAX_FRAME_LEN: u16 = 16384;

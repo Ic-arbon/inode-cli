@@ -6,10 +6,11 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     /// No active session and no automatic-reconnect target.
+    #[default]
     Stopped,
     /// Obtaining the `svpnginfo` cookie (TLS + login flow).
     Authenticating,
@@ -50,6 +51,62 @@ impl fmt::Display for SessionState {
             SessionState::Failed => "Failed",
         };
         f.write_str(s)
+    }
+}
+
+/// `status --json` schema, defined in docs/architecture.md §5.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StatusSnapshot {
+    pub state: SessionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<Stats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub service: ServiceStatus,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+    #[serde(default)]
+    pub routes: Vec<String>,
+    #[serde(default)]
+    pub dns: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keepalive: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Stats {
+    pub tx_pkts: u64,
+    pub tx_bytes: u64,
+    pub rx_pkts: u64,
+    pub rx_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceStatus {
+    pub supervisor: String,
+    pub enabled: bool,
+    pub autostart: bool,
+}
+
+impl Default for ServiceStatus {
+    fn default() -> Self {
+        Self {
+            supervisor: "none".into(),
+            enabled: false,
+            autostart: false,
+        }
     }
 }
 

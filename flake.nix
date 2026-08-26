@@ -62,6 +62,7 @@
         inode = import ./nix/inode.nix {
           inherit pkgs craneLib;
           src = ./.;
+          openconnect = inode-openconnect;
         };
 
         inode-openconnect = import ./nix/openconnect-h3c-v921.nix {

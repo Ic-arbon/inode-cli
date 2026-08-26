@@ -19,7 +19,7 @@
  lib_srcs_openssl = openssl.c openssl-pkcs11.c
 --- a/h3c.c
 +++ b/h3c.c
-@@ -0,0 +1,975 @@
+@@ -0,0 +1,978 @@
 +// SPDX-License-Identifier: LGPL-2.1-or-later
 +// Author: Iru Cai <vimacs.hacks@gmail.com>
 +
@@ -726,11 +726,14 @@
 +	free(logout_resp);
 +	openconnect_close_https(vpninfo, 0);
 +
-+	if (ret < 0)
++	/* do_https_request() maps an empty HTTP 200 body to -EINVAL; the H3C
++	 * logout endpoint legitimately answers with exactly that. */
++	if (ret < 0 && ret != -EINVAL) {
 +		vpn_progress(vpninfo, PRG_ERR, _("H3C logout failed\n"));
-+	else
-+		vpn_progress(vpninfo, PRG_INFO, _("H3C logout successful\n"));
-+	return ret;
++		return ret;
++	}
++	vpn_progress(vpninfo, PRG_INFO, _("H3C logout successful\n"));
++	return 0;
 +}
 +
 +static int h3c_write_data_frame(struct openconnect_info *vpninfo,
@@ -995,6 +998,23 @@
 +	http_common_headers(vpninfo, buf);
 +	vpninfo->useragent = orig_ua;
 +}
+--- a/http.c
++++ b/http.c
+@@ -979,7 +979,13 @@
+ 		goto out;
+ 	}
+ 	if (!buf->pos || result != 200) {
+-		if (!buf->pos)
++		if (!buf->pos && vpninfo->proto &&
++		    vpninfo->proto->proto == PROTO_H3C)
++			/* H3C NET_EXTEND and logout return a valid HTTP 200
++			 * with an empty body. */
++			vpn_progress(vpninfo, PRG_DEBUG,
++				     _("H3C empty HTTP 200 body (expected)\n"));
++		else if (!buf->pos)
+ 			vpn_progress(vpninfo, PRG_ERR,
+ 				     _("Unexpected empty response body from server\n"));
+ 		else
 --- a/library.c
 +++ b/library.c
 @@ -397,6 +397,17 @@
@@ -1099,3 +1119,17 @@
  /* Callback for indicating that a TCP reconnection succeeded. */
  typedef void (*openconnect_reconnected_vfn) (void *privdata);
  void openconnect_set_reconnected_handler(struct openconnect_info *vpninfo,
+--- a/libopenconnect.map.in
++++ b/libopenconnect.map.in
+@@ -132,6 +132,11 @@
+ 	openconnect_set_sni;
+ } OPENCONNECT_5_8;
+ 
++OPENCONNECT_5_10 {
++ global:
++	openconnect_set_drop_uid;
++} OPENCONNECT_5_9;
++
+ OPENCONNECT_PRIVATE {
+  global: @SYMVER_TIME@ @SYMVER_GETLINE@ @SYMVER_JAVA@ @SYMVER_ASPRINTF@ @SYMVER_VASPRINTF@ @SYMVER_WIN32_STRERROR@ @SYMVER_WIN32_SETENV@
+ 	openconnect_get_tls_library_version;
