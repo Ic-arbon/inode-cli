@@ -19,7 +19,7 @@
  lib_srcs_openssl = openssl.c openssl-pkcs11.c
 --- a/h3c.c
 +++ b/h3c.c
-@@ -0,0 +1,597 @@
+@@ -0,0 +1,975 @@
 +// SPDX-License-Identifier: LGPL-2.1-or-later
 +// Author: Iru Cai <vimacs.hacks@gmail.com>
 +
@@ -30,6 +30,107 @@
 +#include <assert.h>
 +#include <libxml/tree.h>
 +#include <stdbool.h>
++
++#define H3C_FRAME_IPV4		1
++#define H3C_FRAME_KEEPALIVE	2
++#define H3C_KEEPALIVE_DEFAULT	30
++#define H3C_KEEPALIVE_MISS_LIMIT 3
++#define H3C_MAX_FRAME_LEN	16384
++
++/*
++ * Protocol state that survives reconnects and is owned by h3c.c.
++ * `vpninfo->proto_data` points here; released by h3c_free_state().
++ */
++struct h3c_state {
++	char *login_url;
++	char *logout_url;
++	char *checkonline_url;
++	char *challenge_url;
++	char *tunnel_gateway;
++
++	int keepalive_time;	/* KEEPALIVETIME header; 0 disables keepalive/DPD */
++	int keepalive_configured;
++	int restrict_mode;
++	time_t last_rx;
++	time_t last_tx;
++
++	/* NET_EXTEND parse buffer (reused per connection attempt) */
++	struct oc_vpn_option *parse_opts;
++	struct oc_ip_info parse_ip_info;
++	int parse_saw_address;
++
++	/* Outgoing partial-write state */
++	size_t tx_offset;
++
++	/* Keepalive frame partial-write state */
++	unsigned char hb_buf[4];
++	size_t hb_offset;
++	int hb_pending;
++};
++
++static struct h3c_state *h3c_get_state(struct openconnect_info *vpninfo)
++{
++	struct h3c_state *state = vpninfo->proto_data;
++
++	if (!state) {
++		state = calloc(1, sizeof(*state));
++		if (!state)
++			return NULL;
++		state->keepalive_time = H3C_KEEPALIVE_DEFAULT;
++		vpninfo->proto_data = state;
++	}
++	return state;
++}
++
++void h3c_free_state(struct openconnect_info *vpninfo)
++{
++	struct h3c_state *state = vpninfo->proto_data;
++
++	if (!state)
++		return;
++
++	free(state->login_url);
++	free(state->logout_url);
++	free(state->checkonline_url);
++	free(state->challenge_url);
++	free(state->tunnel_gateway);
++
++	free_split_routes(&state->parse_ip_info);
++	free_optlist(state->parse_opts);
++
++	free(state);
++	vpninfo->proto_data = NULL;
++}
++
++static void h3c_reset_parse_state(struct h3c_state *state)
++{
++	free_split_routes(&state->parse_ip_info);
++	free_optlist(state->parse_opts);
++	memset(&state->parse_ip_info, 0, sizeof(state->parse_ip_info));
++	state->parse_opts = NULL;
++	state->parse_saw_address = 0;
++	free(state->tunnel_gateway);
++	state->tunnel_gateway = NULL;
++}
++
++static int h3c_set_url(char **dst, const char *url)
++{
++	free(*dst);
++	*dst = NULL;
++
++	if (!url)
++		return 0;
++
++	/* Login URLs are stored without a leading slash because
++	 * do_https_request() prepends one. */
++	if (url[0] == '/')
++		url++;
++
++	*dst = strdup(url);
++	if (!*dst)
++		return -ENOMEM;
++	return 0;
++}
 +
 +static int h3c_request_user_auth(struct openconnect_info *vpninfo, char **username,
 +				 char **password)
@@ -97,9 +198,19 @@
 +
 +static int h3c_get_vpn_param_from_headers(struct openconnect_info *vpninfo, char *k, char *v)
 +{
-+	bool set_value = true;
++	struct h3c_state *state = h3c_get_state(vpninfo);
++	const char *value;
++	int ret;
++
++	if (!state)
++		return -ENOMEM;
++
 +	if (!strcmp(k, "IPADDRESS")) {
-+		vpninfo->ip_info.addr = strdup(v);
++		value = add_option_dup(&state->parse_opts, "ipaddr", v, -1);
++		if (!value)
++			return -ENOMEM;
++		state->parse_ip_info.addr = value;
++		state->parse_saw_address = 1;
 +	} else if (!strcmp(k, "SUBNETMASK")) {
 +		int masklen = atoi(v);
 +		struct in_addr mask_addr;
@@ -111,9 +222,12 @@
 +			mask_addr.s_addr = 0;
 +
 +		inet_ntop(AF_INET, &mask_addr, abuf, sizeof(abuf));
-+		vpninfo->ip_info.netmask = strdup(abuf);
++		value = add_option_dup(&state->parse_opts, "netmask", abuf, -1);
++		if (!value)
++			return -ENOMEM;
++		state->parse_ip_info.netmask = value;
 +	} else if (!strcmp(k, "ROUTES")) {
-+		// ROUTES: ip/mask;ip/mask;...;ip/mask
++		/* ROUTES: ip/mask;ip/mask;...;ip/mask */
 +		const char *vp = v;
 +		while (*vp != 0) {
 +			const char *scanpos = vp;
@@ -121,19 +235,55 @@
 +				++scanpos;
 +			}
 +			if (scanpos != vp) {
-+				struct oc_split_include *route =
-+					(struct oc_split_include *)malloc(
-+						sizeof(struct oc_split_include));
-+				route->route = strndup(vp, scanpos - vp);
-+				route->next = vpninfo->ip_info.split_includes;
-+				vpninfo->ip_info.split_includes = route;
++				struct oc_split_include *route;
++				value = add_option_dup(&state->parse_opts,
++						       "split-include", vp,
++						       scanpos - vp);
++				if (!value)
++					return -ENOMEM;
++				route = malloc(sizeof(*route));
++				if (!route)
++					return -ENOMEM;
++				route->route = value;
++				route->next = state->parse_ip_info.split_includes;
++				state->parse_ip_info.split_includes = route;
 +			}
 +			vp = scanpos + 1;
 +		}
++	} else if (!strcmp(k, "DNS")) {
++		/* DNS: ip;ip;ip */
++		const char *vp = v;
++		int n = 0;
++		while (*vp != 0 && n < 3) {
++			const char *scanpos = vp;
++			while (*scanpos != 0 && *scanpos != ';') {
++				++scanpos;
++			}
++			if (scanpos != vp) {
++				value = add_option_dup(&state->parse_opts, "DNS",
++						       vp, scanpos - vp);
++				if (!value)
++					return -ENOMEM;
++				state->parse_ip_info.dns[n++] = value;
++			}
++			vp = scanpos + 1;
++		}
++	} else if (!strcmp(k, "GATEWAY")) {
++		free(state->tunnel_gateway);
++		state->tunnel_gateway = strdup(v);
++		if (!state->tunnel_gateway)
++			return -ENOMEM;
++	} else if (!strcmp(k, "KEEPALIVETIME")) {
++		state->keepalive_configured = 1;
++		state->keepalive_time = atoi(v);
++	} else if (!strcmp(k, "RESTRICT")) {
++		state->restrict_mode = atoi(v);
 +	} else {
-+		set_value = false;
++		/* Unknown header: preserve it for diagnostics. */
++		add_option_dup(&state->parse_opts, k, v, -1);
 +	}
-+	if (set_value && vpninfo->dump_http_traffic) {
++
++	if (vpninfo->dump_http_traffic) {
 +		char buf[1000];
 +		strcpy(buf, k);
 +		strcat(buf, ":");
@@ -141,7 +291,8 @@
 +		dump_buf(vpninfo, '<', buf);
 +	}
 +
-+	return 0;
++	ret = 0;
++	return ret;
 +}
 +
 +static int h3c_store_location_action_from_headers(struct openconnect_info *vpninfo, char *k,
@@ -267,7 +418,11 @@
 +
 +int h3c_obtain_cookie(struct openconnect_info *vpninfo)
 +{
++	struct h3c_state *state = h3c_get_state(vpninfo);
 +	int ret;
++
++	if (!state)
++		return -ENOMEM;
 +
 +	ret = openconnect_open_https(vpninfo);
 +	if (ret) {
@@ -401,26 +556,12 @@
 +		return -EINVAL;
 +	}
 +
-+	if (login_url[0] == '/') {
-+		add_option_dup(&vpninfo->cstp_options, "login_url", login_url + 1, -1);
-+	} else {
-+		add_option_dup(&vpninfo->cstp_options, "login_url", login_url, -1);
-+	}
-+	if (logout_url[0] == '/') {
-+		add_option_dup(&vpninfo->cstp_options, "logout_url", logout_url + 1, -1);
-+	} else {
-+		add_option_dup(&vpninfo->cstp_options, "logout_url", logout_url, -1);
-+	}
-+	if (checkonline_url[0] == '/') {
-+		add_option_dup(&vpninfo->cstp_options, "checkonline_url", checkonline_url + 1,
-+			       -1);
-+	} else {
-+		add_option_dup(&vpninfo->cstp_options, "checkonline_url", checkonline_url, -1);
-+	}
-+	if (challenge_url[0] == '/') {
-+		add_option_dup(&vpninfo->cstp_options, "challenge_url", challenge_url + 1, -1);
-+	} else {
-+		add_option_dup(&vpninfo->cstp_options, "challenge_url", challenge_url, -1);
++	if (h3c_set_url(&state->login_url, login_url) ||
++	    h3c_set_url(&state->logout_url, logout_url) ||
++	    h3c_set_url(&state->checkonline_url, checkonline_url) ||
++	    h3c_set_url(&state->challenge_url, challenge_url)) {
++		ret = -ENOMEM;
++		goto obtain_cookie_out;
 +	}
 +
 +	char *username = NULL, *password = NULL;
@@ -474,140 +615,377 @@
 +
 +int h3c_connect(struct openconnect_info *vpninfo)
 +{
++	struct h3c_state *state = h3c_get_state(vpninfo);
++	struct oc_text_buf *request_data;
++	char *handshake_resp = NULL;
++	int ret;
++
++	if (!state)
++		return -ENOMEM;
++
++	h3c_reset_parse_state(state);
++
++	/* Cookie was produced by h3c_obtain_cookie() and persists across
++	 * reconnects. Split it into the option list once if needed. */
 +	if (!vpninfo->cookies) {
-+		int ret = internal_split_cookies(vpninfo, 1, "svpnginfo");
++		ret = internal_split_cookies(vpninfo, 1, "svpnginfo");
 +		if (ret)
 +			return ret;
 +	}
 +
-+	struct oc_text_buf *request_data = buf_alloc();
-+	vpninfo->urlpath = (char *)"";
-+	char *handshake_resp = NULL;
-+	do_https_request(vpninfo, "NET_EXTEND", NULL, request_data, &handshake_resp,
-+			 h3c_get_vpn_param_from_headers, HTTP_BODY_ON_ERROR);
++	ret = openconnect_open_https(vpninfo);
++	if (ret)
++		return ret;
++
++	request_data = buf_alloc();
++	if (!request_data)
++		return -ENOMEM;
++
++	free(vpninfo->urlpath);
++	vpninfo->urlpath = strdup("");
++	if (!vpninfo->urlpath) {
++		buf_free(request_data);
++		return -ENOMEM;
++	}
++
++	ret = do_https_request(vpninfo, "NET_EXTEND", NULL, request_data,
++			       &handshake_resp, h3c_get_vpn_param_from_headers,
++			       HTTP_BODY_ON_ERROR);
++	free(handshake_resp);
++	buf_free(request_data);
++
++	if (!state->parse_saw_address) {
++		vpn_progress(vpninfo, PRG_ERR,
++			     _("H3C NET_EXTEND did not provide an IP address\n"));
++		h3c_reset_parse_state(state);
++		return ret < 0 ? ret : -EINVAL;
++	}
++
++	if (!state->parse_ip_info.mtu)
++		state->parse_ip_info.mtu = 1400;
++
++	/* install_vpn_opts() takes ownership of parse_opts and frees the
++	 * previous cstp_options/ip_info, so URL options are kept separately
++	 * in h3c_state. */
++	ret = install_vpn_opts(vpninfo, state->parse_opts, &state->parse_ip_info);
++	if (ret) {
++		free_split_routes(&state->parse_ip_info);
++		free_optlist(state->parse_opts);
++		state->parse_opts = NULL;
++		memset(&state->parse_ip_info, 0, sizeof(state->parse_ip_info));
++		return ret;
++	}
++	state->parse_opts = NULL;
++	memset(&state->parse_ip_info, 0, sizeof(state->parse_ip_info));
++
++	/* Reset transport buffers. */
++	free_pkt(vpninfo, vpninfo->cstp_pkt);
++	vpninfo->cstp_pkt = NULL;
++	vpninfo->partial_rec_size = 0;
++	state->tx_offset = 0;
++	state->hb_offset = 0;
++	state->hb_pending = 0;
++	state->last_rx = state->last_tx = vpninfo->ssl_times.last_rx =
++		vpninfo->ssl_times.last_tx = time(NULL);
 +
 +	monitor_fd_new(vpninfo, ssl);
 +	monitor_read_fd(vpninfo, ssl);
 +	monitor_except_fd(vpninfo, ssl);
-+	vpninfo->ip_info.mtu = 1400;
 +
-+	buf_free(request_data);
++	vpn_progress(vpninfo, PRG_INFO,
++		     _("H3C connected; keepalive %d seconds\n"),
++		     state->keepalive_time);
 +	return 0;
 +}
 +
 +int h3c_bye(struct openconnect_info *vpninfo, const char *reason)
 +{
++	struct h3c_state *state = h3c_get_state(vpninfo);
++	char *logout_resp = NULL;
++	int ret;
++
 +	openconnect_close_https(vpninfo, 0);
 +
-+	char *logout_url = NULL;
-+	for (struct oc_vpn_option *opt = vpninfo->cstp_options; opt != NULL; opt = opt->next) {
-+		if (strcmp(opt->option, "logout_url") == 0) {
-+			logout_url = opt->value;
-+		}
++	if (!state || !state->logout_url) {
++		vpn_progress(vpninfo, PRG_DEBUG,
++			     _("H3C logout URL unknown; skipping logout request\n"));
++		return -EINVAL;
 +	}
 +
-+	if (logout_url != NULL) {
-+		char *logout_resp = NULL;
-+		vpninfo->urlpath = strdup(logout_url);
-+		int ret = do_https_request(vpninfo, "GET", NULL, NULL, &logout_resp, NULL,
-+					   HTTP_BODY_ON_ERROR);
++	ret = openconnect_open_https(vpninfo);
++	if (ret)
 +		return ret;
-+	}
-+	return -EINVAL;
++
++	free(vpninfo->urlpath);
++	vpninfo->urlpath = strdup(state->logout_url);
++	if (!vpninfo->urlpath)
++		return -ENOMEM;
++
++	ret = do_https_request(vpninfo, "GET", NULL, NULL, &logout_resp, NULL,
++			       HTTP_BODY_ON_ERROR);
++	free(logout_resp);
++	openconnect_close_https(vpninfo, 0);
++
++	if (ret < 0)
++		vpn_progress(vpninfo, PRG_ERR, _("H3C logout failed\n"));
++	else
++		vpn_progress(vpninfo, PRG_INFO, _("H3C logout successful\n"));
++	return ret;
 +}
 +
-+static void h3c_handle_outgoing(struct openconnect_info *vpninfo)
++static int h3c_write_data_frame(struct openconnect_info *vpninfo,
++				struct h3c_state *state, int *work_done)
 +{
-+	vpninfo->ssl_times.last_tx = time(NULL);
-+	unmonitor_write_fd(vpninfo, ssl);
++	struct pkt *pkt = vpninfo->current_ssl_pkt;
++	size_t total = pkt->len + 4;
++	size_t off = state->tx_offset;
++	int ret;
 +
-+	vpn_progress(vpninfo, PRG_TRACE, _("Packet outgoing:\n"));
-+	store_le16(&vpninfo->current_ssl_pkt->h3c.type, 1);
-+	store_be16(&vpninfo->current_ssl_pkt->h3c.len, vpninfo->current_ssl_pkt->len);
-+	int ret = ssl_nonblock_write(vpninfo, 0, &vpninfo->current_ssl_pkt->h3c.type,
-+				     vpninfo->current_ssl_pkt->len + 4);
++	unmonitor_write_fd(vpninfo, ssl);
++	ret = ssl_nonblock_write(vpninfo, 0,
++				 (unsigned char *)&pkt->h3c.type + off,
++				 total - off);
 +	if (ret < 0) {
-+		vpn_progress(vpninfo, PRG_ERR, _("Send packet failed\n"));
-+		/* TODO: we don't know what to do now */
++		vpn_progress(vpninfo, PRG_ERR, _("H3C send packet failed\n"));
++		return ret;
 +	}
++	if (ret > 0)
++		off += ret;
++	state->tx_offset = off;
++
++	if (off == total) {
++		vpninfo->ssl_times.last_tx = state->last_tx = time(NULL);
++		free_pkt(vpninfo, pkt);
++		vpninfo->current_ssl_pkt = NULL;
++		state->tx_offset = 0;
++		(*work_done)++;
++	}
++	return 0;
++}
++
++static int h3c_handle_outgoing(struct openconnect_info *vpninfo,
++			       struct h3c_state *state, int *work_done)
++{
++	int ret;
++
++	if (!vpninfo->current_ssl_pkt) {
++		struct pkt *pkt = dequeue_packet(&vpninfo->outgoing_queue);
++		if (!pkt)
++			return 0;
++
++		store_le16(&pkt->h3c.type, H3C_FRAME_IPV4);
++		store_be16(&pkt->h3c.len, pkt->len);
++		vpninfo->current_ssl_pkt = pkt;
++		state->tx_offset = 0;
++	}
++
++	ret = h3c_write_data_frame(vpninfo, state, work_done);
++	return ret;
++}
++
++static int h3c_parse_frames(struct openconnect_info *vpninfo,
++			    struct h3c_state *state, int *work_done)
++{
++	struct pkt *pkt = vpninfo->cstp_pkt;
++	unsigned char *buf = (unsigned char *)pkt->data;
++	size_t len = vpninfo->partial_rec_size;
++	size_t off = 0;
++	int ret = 0;
++
++	while (len - off >= 4) {
++		uint16_t plen = load_be16(buf + off + 2);
++
++		if (plen > H3C_MAX_FRAME_LEN) {
++			vpn_progress(vpninfo, PRG_ERR,
++				     _("H3C frame too large (%u bytes)\n"), plen);
++			ret = -EINVAL;
++			break;
++		}
++		if (len - off < (size_t)4 + plen)
++			break;
++
++		/* Server keepalive response: 02 02 00 00 */
++		if (buf[off] == 0x02 && buf[off + 1] == 0x02 && plen == 0) {
++			vpn_progress(vpninfo, PRG_DEBUG,
++				     _("H3C keepalive response received\n"));
++			off += 4;
++			(*work_done)++;
++			continue;
++		}
++
++		if (load_le16(buf + off) == H3C_FRAME_IPV4) {
++			struct pkt *out = alloc_pkt(vpninfo, plen);
++			if (!out) {
++				ret = -ENOMEM;
++				break;
++			}
++			memcpy(out->data, buf + off + 4, plen);
++			out->len = plen;
++			queue_packet(&vpninfo->incoming_queue, out);
++			off += 4 + plen;
++			(*work_done)++;
++			continue;
++		}
++
++		vpn_progress(vpninfo, PRG_ERR,
++			     _("H3C unknown frame type %02x %02x len %u; dropping\n"),
++			     buf[off], buf[off + 1], plen);
++		off += 4 + plen;
++	}
++
++	if (off) {
++		memmove(buf, buf + off, len - off);
++		vpninfo->partial_rec_size = len - off;
++	}
++	return ret;
++}
++
++static int h3c_start_keepalive(struct h3c_state *state)
++{
++	state->hb_buf[0] = 0x02;
++	state->hb_buf[1] = 0x00;
++	state->hb_buf[2] = 0x00;
++	state->hb_buf[3] = 0x00;
++	state->hb_offset = 0;
++	state->hb_pending = 1;
++	return 0;
++}
++
++static int h3c_write_keepalive(struct openconnect_info *vpninfo,
++			       struct h3c_state *state, int *work_done)
++{
++	size_t off = state->hb_offset;
++	int ret;
++
++	unmonitor_write_fd(vpninfo, ssl);
++	ret = ssl_nonblock_write(vpninfo, 0, state->hb_buf + off, 4 - off);
++	if (ret < 0)
++		return ret;
++	if (ret > 0)
++		off += ret;
++	state->hb_offset = off;
++
++	if (off == 4) {
++		vpninfo->ssl_times.last_tx = state->last_tx = time(NULL);
++		state->hb_pending = 0;
++		state->hb_offset = 0;
++		(*work_done)++;
++		vpn_progress(vpninfo, PRG_DEBUG, _("H3C keepalive sent\n"));
++	}
++	return 0;
 +}
 +
 +int h3c_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 +{
++	struct h3c_state *state = h3c_get_state(vpninfo);
 +	int work_done = 0;
++	int ret;
++
++	if (!state)
++		return -ENOMEM;
++
++	if (vpninfo->ssl_fd == -1)
++		goto do_reconnect;
 +
 +	while (readable) {
 +		/* Some servers send us packets that are larger than
 +		   negotiated MTU. We reserve some extra space to
 +		   handle that */
-+		int receive_mtu = MAX(16384, vpninfo->deflate_pkt_size ?: vpninfo->ip_info.mtu);
++		int receive_mtu = MAX(H3C_MAX_FRAME_LEN,
++				      vpninfo->deflate_pkt_size ?:
++				      vpninfo->ip_info.mtu);
 +		int len;
 +
 +		if (!vpninfo->cstp_pkt) {
-+			vpninfo->partial_rec_size = 0;
 +			vpninfo->cstp_pkt = alloc_pkt(vpninfo, receive_mtu);
 +			if (!vpninfo->cstp_pkt) {
-+				vpn_progress(vpninfo, PRG_ERR, _("Allocation failed\n"));
++				vpn_progress(vpninfo, PRG_ERR,
++					     _("H3C allocation failed\n"));
 +				break;
 +			}
++			vpninfo->partial_rec_size = 0;
++		}
++
++		if (vpninfo->partial_rec_size >= receive_mtu) {
++			vpn_progress(vpninfo, PRG_ERR,
++				     _("H3C receive buffer overflow\n"));
++			goto do_reconnect;
 +		}
 +
 +		len = ssl_nonblock_read(vpninfo, 0,
-+					vpninfo->cstp_pkt->data + vpninfo->partial_rec_size,
++					vpninfo->cstp_pkt->data +
++					vpninfo->partial_rec_size,
 +					receive_mtu - vpninfo->partial_rec_size);
 +		if (!len)
 +			break;
 +		if (len < 0) {
-+			/* goto do_reconnect; */
-+			return -1;
++			vpn_progress(vpninfo, PRG_ERR,
++				     _("H3C read error; reconnecting\n"));
++			goto do_reconnect;
 +		}
 +
-+		if (vpninfo->partial_rec_size) {
-+			vpn_progress(vpninfo, PRG_DEBUG,
-+				     _("Received %d more bytes after partial %d\n"), len,
-+				     vpninfo->partial_rec_size);
-+			len += vpninfo->partial_rec_size;
-+			vpninfo->partial_rec_size = len;
++		vpninfo->partial_rec_size += len;
++		vpninfo->ssl_times.last_rx = state->last_rx = time(NULL);
++
++		ret = h3c_parse_frames(vpninfo, state, &work_done);
++		if (ret)
++			goto do_reconnect;
++	}
++
++	ret = h3c_handle_outgoing(vpninfo, state, &work_done);
++	if (ret)
++		goto do_reconnect;
++
++	/* Keepalive / Dead Peer Detection. KEEPALIVETIME=0 disables both. */
++	if (state->keepalive_time > 0) {
++		time_t now = time(NULL);
++		time_t next_hb = state->last_tx + state->keepalive_time;
++		time_t dpd_due = state->last_rx +
++				 state->keepalive_time *
++				 H3C_KEEPALIVE_MISS_LIMIT;
++
++		if (state->hb_pending) {
++			ret = h3c_write_keepalive(vpninfo, state, &work_done);
++			if (ret)
++				goto do_reconnect;
++		} else if (now >= next_hb) {
++			h3c_start_keepalive(state);
++			ret = h3c_write_keepalive(vpninfo, state, &work_done);
++			if (ret)
++				goto do_reconnect;
 +		}
 +
-+		vpninfo->ssl_times.last_rx = time(NULL);
-+
-+		unsigned char *buf = vpninfo->cstp_pkt->data;
-+
-+		if (buf[0] == 1) {
-+			uint16_t iplen = load_be16(buf + 2);
-+			if (len - 4 >= iplen) {
-+				if (len - 4 != iplen) {
-+					dump_buf_hex(vpninfo, PRG_DEBUG, '>', buf, len);
-+				}
-+				memmove(buf, buf + 4, len - 4);
-+				vpninfo->cstp_pkt->len = len - 4;
-+				vpninfo->partial_rec_size = 0;
-+				vpn_progress(vpninfo, PRG_TRACE,
-+					     _("Moved down %d bytes after previous packet\n"),
-+					     len);
-+			}
-+		} else {
-+			dump_buf_hex(vpninfo, PRG_ERR, '>', buf, len);
++		if (now >= dpd_due) {
++			vpn_progress(vpninfo, PRG_ERR,
++				     _("H3C Dead Peer Detection detected dead peer!\n"));
++			goto do_reconnect;
 +		}
 +
-+		queue_packet(&vpninfo->incoming_queue, vpninfo->cstp_pkt);
-+		vpninfo->cstp_pkt = NULL;
-+		work_done++;
++		/* Ensure the event loop wakes for the next keepalive or
++		 * DPD deadline even if there is no other work. */
++		ka_check_deadline(timeout, now, next_hb);
++		ka_check_deadline(timeout, now, dpd_due);
 +	}
 +
-+	if (vpninfo->current_ssl_pkt) {
-+		/* TODO: we don't know what to do yet */
-+		h3c_handle_outgoing(vpninfo);
-+		vpninfo->current_ssl_pkt = NULL;
-+		work_done++;
-+	}
-+
-+	while ((vpninfo->current_ssl_pkt = dequeue_packet(&vpninfo->outgoing_queue))) {
-+		h3c_handle_outgoing(vpninfo);
-+		work_done++;
-+	}
 +	return work_done;
++
++do_reconnect:
++	vpn_progress(vpninfo, PRG_INFO, _("H3C reconnecting...\n"));
++
++	free_pkt(vpninfo, vpninfo->current_ssl_pkt);
++	vpninfo->current_ssl_pkt = NULL;
++	state->tx_offset = 0;
++	state->hb_pending = 0;
++	state->hb_offset = 0;
++
++	ret = ssl_reconnect(vpninfo);
++	if (ret) {
++		vpn_progress(vpninfo, PRG_ERR, _("H3C reconnect failed\n"));
++		vpninfo->quit_reason = "H3C reconnect failed";
++		return ret;
++	}
++
++	return 1;
 +}
 +
 +void h3c_http_headers(struct openconnect_info *vpninfo, struct oc_text_buf *buf)
@@ -637,6 +1015,30 @@
  	}, {
  		.name = "nullppp",
  		.pretty_name = N_("PPP over TLS"),
+@@ -533,6 +544,15 @@
+ 	return result;
+ }
+ 
++int openconnect_set_drop_uid(struct openconnect_info *vpninfo, uid_t uid, gid_t gid)
++{
++	if (!vpninfo)
++		return -EINVAL;
++	vpninfo->uid = uid;
++	vpninfo->gid = gid;
++	return 0;
++}
++
+ int openconnect_set_reported_os(struct openconnect_info *vpninfo,
+ 				const char *os)
+ {
+@@ -771,6 +791,7 @@
+ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
+ {
+ 	openconnect_close_https(vpninfo, 1);
++	h3c_free_state(vpninfo);
+ 	if (vpninfo->proto->udp_shutdown)
+ 		vpninfo->proto->udp_shutdown(vpninfo);
+ 	if (vpninfo->tncc_fd >= 0)
 --- a/openconnect-internal.h
 +++ b/openconnect-internal.h
 @@ -218,6 +218,11 @@
@@ -659,12 +1061,21 @@
  
  /* All supported PPP packet framings/encapsulations */
  #define PPP_ENCAP_RFC1661	1	/* Plain/synchronous/pre-framed PPP (RFC1661) */
-@@ -1392,6 +1398,13 @@
+@@ -809,6 +815,7 @@
+ 
+ 	int verbose;
+ 	void *cbdata;
++	void *proto_data;	/* protocol-private state (h3c.c uses this) */
+ 	openconnect_validate_peer_cert_vfn validate_peer_cert;
+ 	openconnect_write_new_config_vfn write_new_config;
+ 	openconnect_open_webview_vfn open_webview;
+@@ -1392,6 +1399,14 @@
  
  /* auth-globalprotect.c */
  int gpst_obtain_cookie(struct openconnect_info *vpninfo);
 +
 +/* h3c.c */
++void h3c_free_state(struct openconnect_info *vpninfo);
 +int h3c_connect(struct openconnect_info *vpninfo);
 +int h3c_bye(struct openconnect_info *vpninfo, const char *reason);
 +int h3c_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable);
@@ -673,3 +1084,18 @@
  void gpst_common_headers(struct openconnect_info *vpninfo, struct oc_text_buf *buf);
  int gpst_bye(struct openconnect_info *vpninfo, const char *reason);
  const char *gpst_os_name(struct openconnect_info *vpninfo);
+--- a/openconnect.h
++++ b/openconnect.h
+@@ -835,6 +835,12 @@
+ void openconnect_set_setup_tun_handler(struct openconnect_info *vpninfo,
+ 				       openconnect_setup_tun_vfn setup_tun);
+ 
++/* Drop privileges to the given uid/gid after the tun device and routes
++ * have been configured. This mirrors the CLI `-U/--setuid' option for
++ * embedding applications. */
++int openconnect_set_drop_uid(struct openconnect_info *vpninfo,
++			     uid_t uid, gid_t gid);
++
+ /* Callback for indicating that a TCP reconnection succeeded. */
+ typedef void (*openconnect_reconnected_vfn) (void *privdata);
+ void openconnect_set_reconnected_handler(struct openconnect_info *vpninfo,
