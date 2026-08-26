@@ -41,6 +41,13 @@ RuntimeDirectoryMode=0750
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/inode-vpn
 
 [Install]
 WantedBy=multi-user.target
@@ -226,6 +233,9 @@ mod tests {
         assert!(text.contains("Restart=always"));
         assert!(text.contains("RuntimeDirectory=inode-vpn"));
         assert!(text.contains("WantedBy=multi-user.target"));
+        assert!(text.contains("CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID"));
+        assert!(text.contains("ProtectSystem=strict"));
+        assert!(text.contains("ProtectHome=read-only"));
     }
 
     #[cfg(target_os = "macos")]

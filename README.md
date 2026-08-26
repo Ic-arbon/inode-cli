@@ -1,86 +1,116 @@
-# openconnect-h3c VPN
+# inode-vpn
 
-带 H3C SSL VPN 协议支持的 OpenConnect，通过 Nix flake 统一构建，并附带一个仿 systemd 用法的 `vpn` 管理命令（连接 / 断开 / 状态 / macOS 开盖唤醒自动重连）。
+H3C SSL VPN 客户端 + 持久化服务（macOS / Linux）。基于自己的
+`libopenconnect-h3c` fork（upstream v9.21 + H3C 协议），由 Rust 实现。
 
-## 1. 安装 Nix
+## 当前状态
 
-需要支持 flakes 的 Nix。推荐用 [Determinate Systems 安装器](https://github.com/DeterminateSystems/nix-installer)，它默认开启 flakes，且卸载干净：
+| 里程碑 | 状态 |
+|---|---|
+| M0 基线（workspace / fork 构建 / CI） | ✅ 代码完成；CI runner 结果待确认 |
+| M1 fork 协议引擎（组帧 / 心跳 / DPD / 重连） | ✅ 已实测通过 |
+| M2 daemon + CLI 核心 | ✅ 已实测通过（script-tun 模式） |
+| M3 Linux 服务化（routectl / systemd / netwatch） | 🟡 代码就绪，待远程真机验收 |
+| M4 macOS 服务化（routectl / LaunchDaemon） | 🟡 代码就绪，待真机验收 |
+| M5 安全收敛 / 发布 | 🟡 部分完成 |
+
+旧 `vpn` shell 脚本在 `.#vpn` 中保留，仅用于过渡回退；新命令为 `inode`。
+
+## 架构速览
+
+```text
+inode (CLI)
+  │ UDS · JSON-RPC 2.0 · peer-uid 校验
+  ▼
+inode-vpnd (root daemon, systemd / LaunchDaemon 管理)
+  ├─ libopenconnect-h3c (fork: h3c 协议 / 隧道 / 心跳 / 重连)
+  └─ inode-routectl (vpnc-script 替代：tun / 路由 / DNS)
+```
+
+完整设计见 `docs/architecture.md`。
+
+## 构建
+
+需要启用 flakes 的 Nix：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
+nix build .#inode          # inode / inode-vpnd / inode-routectl
+nix build .#inode-openconnect   # 自己的 fork
+nix develop                 # 进入开发环境（含 cargo / rustc）
 ```
 
-装完后**重开一个终端**，验证：
+Rust 单独构建（需要 fork 的 lib 路径）：
 
 ```sh
-nix --version
+nix build .#inode-openconnect -o oc
+OPENCONNECT_H3C_LIB="$(readlink oc)" \
+OPENCONNECT_H3C_INCLUDE="$(nix eval --raw .#inode-openconnect.dev)" \
+cargo build --workspace
 ```
 
-> 如果你用的是官方安装器，需要手动开启 flakes，在 `~/.config/nix/nix.conf` 写入：
-> ```
-> experimental-features = nix-command flakes
-> ```
+## 配置
 
-## 2. 配置凭据
+`~/.config/inode-vpn/config.toml`（必须 0600）：
 
-复制示例并填入你的账号信息：
+```toml
+[gateway]
+url = "vpn.example.com:2000"        # 与旧 .auth gateway 同语义
+servercert = "pin-sha256:..."       # SPKI pin，可留空后 discover-cert
+
+[credentials]
+username = "..."
+password = "..."
+
+[network]
+keepalive = "auto"                  # 或秒数；0 关闭心跳/DPD
+preserve_cidrs = []                 # 额外保护网段，如 ["192.168.0.0/23"]
+dns = "server"                      # server | ignore
+
+[service]
+autostart = true
+restart_delay = 10
+```
+
+从旧 `.auth` 迁移：
 
 ```sh
-cp .auth.example .auth
+inode config migrate
 ```
 
-`.auth` 为 `key=value` 格式（已在 `.gitignore` 中，不会被提交）：
-
-```
-username=你的用户名
-password=你的密码
-servercert=pin-sha256:...        # 可选，证书指纹校验
-gateway=vpn.example.com:443      # 网关地址:端口
-```
-
-## 3. 进入开发环境
-
-在项目目录下：
+## 使用
 
 ```sh
-nix develop
+inode start
+inode stop
+inode restart
+inode status [--json]      # exit: 0=Connected, 3=Stopped, 1=Failed
+inode logs [-f]
+inode enable [--now]       # Linux: systemd unit；macOS: LaunchDaemon
+inode disable [--now]
+inode diagnose             # 脱敏诊断包
 ```
 
-首次会拉取并构建 openconnect-h3c（耗时较长，后续走缓存秒进）。进入后会打印可用命令提示，此时 `vpn`、`openconnect` 都已在 `PATH` 中。
+服务安装要求 root（首次会通过 `sudo` 交互授权），可执行文件通过稳定链接
+`/var/lib/inode-vpn/current` 引用，避免 Nix store GC 导致 unit 失效。
 
-### 可选：用 direnv 自动进入
+## H3C 协议要点（实测）
 
-仓库已带 `.envrc`（内容为 `use flake`）。装好 [direnv](https://direnv.net/) 后，在目录里执行一次授权，之后 `cd` 进来即自动加载环境：
+- 控制面：`GET /svpn/index.cgi` → `GET /client_getinfo.cgi` →
+  `POST /_xml/login.cgi`（XML form-encoded）→ `NET_EXTEND /`。
+- 数据面：TLS 流内 `type:u16-LE + len:u16-BE + payload`，`type=1` 为 IPv4。
+- 心跳：`02 00 00 00`，服务器应答 `02 02 00 00`；间隔来自
+  `KEEPALIVETIME` 头（默认 30s）。
+- 判活不使用 ping；`checkonline.cgi` 作为独立控制面探针。
 
-```sh
-direnv allow
-```
+## 安全
 
-### 不进 shell 直接跑
+- 密码与 `svpnginfo` cookie 永不进入 argv、日志、IPC 响应或 diagnose 包。
+- 配置 0600 强制；管理 socket 校验 peer uid。
+- systemd 单元启用 capability 白名单、`ProtectSystem=strict`、
+  `ProtectHome=read-only`；macOS 使用 root LaunchDaemon。
 
-```sh
-nix run .#vpn -- start
-```
+## 已知待办
 
-## 4. 使用 `vpn` 命令
-
-仿 systemd 用法，需在含 `.auth` 的目录中运行：
-
-```sh
-vpn start             # 连接
-vpn stop              # 断开
-vpn restart           # 当前目录下重连
-vpn status            # 查看连接 / 工作目录 / 自动重连状态
-```
-
-### macOS 开盖唤醒自动重连（可选）
-
-```sh
-vpn install-sudoers   # 一次性写入 openconnect 的 sudo 免密规则（需一次 sudo 授权）
-vpn enable            # 安装开盖唤醒自动重连服务（依赖上面的免密）
-vpn enable --now      # 安装服务并立即连接
-vpn disable [--now]   # 移除服务（--now 同时断开）
-vpn uninstall-sudoers # 移除免密规则
-```
-
-> 自动重连依赖 sudo 免密：唤醒时无人值守，若未配置免密会卡在等待密码而失败。
+- Linux/macOS 真机验收矩阵（见开发计划 A31–A40）。
+- `inode discover-cert` 与 `config set` 尚未实现。
+- macOS DNS 服务名发现待补。

@@ -2,6 +2,7 @@
 
 use clap::{CommandFactory, Parser, Subcommand};
 use inode_core::ipc::{self, Request, Response};
+use inode_core::redact::Redactor;
 use inode_core::state::StatusSnapshot;
 use inode_core::{Config, SessionState};
 use serde_json::{json, Value};
@@ -128,6 +129,71 @@ fn status_text(status: &StatusSnapshot) {
     }
 }
 
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    Some(format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+/// Redacted diagnostic bundle. Never includes password/cookie values.
+fn run_diagnose(socket: Option<PathBuf>, timeout_ms: u64) -> i32 {
+    let mut redactor = Redactor::new(std::iter::empty::<String>());
+    let mut bundle = json!({
+        "inode_version": env!("CARGO_PKG_VERSION"),
+        "platform": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        },
+    });
+
+    let config_path = Config::default_path().unwrap_or_else(|_| PathBuf::from("config.toml"));
+    match Config::load(&config_path) {
+        Ok(cfg) => {
+            redactor.add(cfg.credentials.password.clone());
+            redactor.add(cfg.credentials.username.clone());
+            bundle["config"] = serde_json::to_value(cfg.redacted()).unwrap_or(Value::Null);
+        }
+        Err(e) => bundle["config_error"] = json!(e.to_string()),
+    }
+
+    if let Ok(stream) = connect(socket.clone(), timeout_ms) {
+        match rpc(stream, 1, "status", json!({})) {
+            Ok(resp) if resp.error.is_none() => {
+                bundle["daemon_status"] = resp.result.unwrap_or(Value::Null);
+            }
+            Ok(resp) => bundle["daemon_error"] = json!(resp.error.map(|e| e.message)),
+            Err(e) => bundle["daemon_error"] = json!(e),
+        }
+    } else {
+        bundle["daemon_error"] = json!("daemon not reachable");
+    }
+
+    bundle["uname"] = json!(command_output("uname", &["-a"]).unwrap_or_default());
+    #[cfg(target_os = "linux")]
+    {
+        bundle["routes"] = json!(command_output("ip", &["route", "show"]).unwrap_or_default());
+        bundle["addrs"] = json!(command_output("ip", &["-4", "addr", "show"]).unwrap_or_default());
+        bundle["dns"] = json!(command_output("resolvectl", &["status"]).unwrap_or_default());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        bundle["routes"] =
+            json!(command_output("netstat", &["-rn", "-f", "inet"]).unwrap_or_default());
+        bundle["addrs"] = json!(command_output("ifconfig", &[]).unwrap_or_default());
+        bundle["dns"] = json!(command_output("scutil", &["--dns"]).unwrap_or_default());
+    }
+
+    let text = serde_json::to_string_pretty(&bundle).unwrap_or_default();
+    println!("{}", redactor.redact(&text));
+    0
+}
+
 fn main() {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
@@ -204,8 +270,7 @@ fn main() {
             }
         }
         Command::Diagnose => {
-            eprintln!("not implemented yet (planned in M5)");
-            std::process::exit(1);
+            std::process::exit(run_diagnose(cli.socket.clone(), cli.timeout_ms));
         }
         ref command @ (Command::Enable { now } | Command::Disable { now }) => {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
