@@ -116,6 +116,7 @@ fn connect(plan: &RoutePlan) -> Result<()> {
             run(&["add", "-net", &net, "-netmask", &mask, tun_ip])?;
         }
     }
+    apply_dns(plan, &phys);
     Ok(())
 }
 
@@ -144,6 +145,7 @@ fn disconnect(plan: &RoutePlan) -> Result<()> {
             .args([&plan.tun_iface, "down"])
             .status();
     }
+    revert_dns(plan, &phys);
     let _ = std::fs::remove_file(state_path(plan));
     Ok(())
 }
@@ -233,6 +235,71 @@ pub fn split_cidr(cidr: &str) -> Result<(String, String)> {
     Ok((net.to_string(), prefix_to_netmask(prefix)))
 }
 
+/// Find the networksetup service bound to an interface, e.g. en0 -> Wi-Fi.
+fn service_for_iface(iface: &str) -> Option<String> {
+    let out = Command::new("networksetup")
+        .args(["-listnetworkserviceorder"])
+        .output()
+        .ok()?;
+    parse_service_order(&String::from_utf8_lossy(&out.stdout), iface)
+}
+
+fn parse_service_order(text: &str, iface: &str) -> Option<String> {
+    let mut current_service: Option<&str> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix('(') {
+            let Some(close) = rest.find(')') else {
+                continue;
+            };
+            let inner = rest[..close].trim();
+            let after = rest[close + 1..].trim();
+            if inner.starts_with("Hardware Port:") {
+                let device = inner.split("Device:").nth(1).map(str::trim).unwrap_or("");
+                if device == iface {
+                    return current_service.map(str::to_string);
+                }
+            } else {
+                current_service = Some(after);
+            }
+        }
+    }
+    None
+}
+
+fn apply_dns(plan: &RoutePlan, phys: &PhysicalState) {
+    if plan.dns_mode == "ignore" || plan.dns.is_empty() {
+        return;
+    }
+    let Some(iface) = phys.iface.as_ref() else {
+        return;
+    };
+    let Some(service) = service_for_iface(iface) else {
+        return;
+    };
+    let mut cmd = Command::new("networksetup");
+    cmd.arg("-setdnsservers").arg(&service);
+    cmd.args(&plan.dns);
+    if cmd.status().map(|s| s.success()).unwrap_or(false) {
+        tracing::info!(iface, service = %service, "VPN DNS applied");
+    }
+}
+
+fn revert_dns(plan: &RoutePlan, phys: &PhysicalState) {
+    if plan.dns_mode == "ignore" || plan.dns.is_empty() {
+        return;
+    }
+    let Some(iface) = phys.iface.as_ref() else {
+        return;
+    };
+    let Some(service) = service_for_iface(iface) else {
+        return;
+    };
+    let _ = Command::new("networksetup")
+        .args(["-setdnsservers", &service, "empty"])
+        .status();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +313,16 @@ mod tests {
             ("192.168.0.0".to_string(), "255.255.192.0".to_string())
         );
         assert!(split_cidr("10.0.0.0/99").is_err());
+    }
+
+    #[test]
+    fn parses_networksetup_service_order() {
+        let text = "(1) Wi-Fi\n(Hardware Port: Wi-Fi, Device: en0)\n\n(2) USB 10/100/1000 LAN\n(Hardware Port: USB 10/100/1000 LAN, Device: en5)\n";
+        assert_eq!(parse_service_order(text, "en0").as_deref(), Some("Wi-Fi"));
+        assert_eq!(
+            parse_service_order(text, "en5").as_deref(),
+            Some("USB 10/100/1000 LAN")
+        );
+        assert_eq!(parse_service_order(text, "en7"), None);
     }
 }

@@ -268,7 +268,7 @@ fn parse_local_addr(iface: &str) -> Result<Option<(String, String)>> {
 }
 
 fn apply_dns(plan: &RoutePlan) {
-    if plan.dns.is_empty() {
+    if plan.dns_mode == "ignore" || plan.dns.is_empty() {
         return;
     }
     if let Ok(out) = Command::new("resolvectl")
@@ -314,6 +314,7 @@ mod tests {
             prefix_len: None,
             mtu: None,
             dns: vec![],
+            dns_mode: "server".into(),
             split_routes: vec![],
             preserve_cidrs: vec![],
             phys_gateway_override: None,

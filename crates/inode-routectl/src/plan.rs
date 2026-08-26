@@ -17,6 +17,7 @@ pub struct RoutePlan {
     pub prefix_len: Option<u8>,
     pub mtu: Option<u16>,
     pub dns: Vec<String>,
+    pub dns_mode: String,
     pub split_routes: Vec<String>,
     pub preserve_cidrs: Vec<String>,
     /// Test override: physical default gateway (skips `ip route` discovery).
@@ -44,6 +45,10 @@ impl RoutePlan {
             .ok()
             .map(|v| v.split_whitespace().map(str::to_string).collect::<Vec<_>>())
             .unwrap_or_default();
+        let dns_mode = env::var("INODE_DNS_MODE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "server".into());
         let split_routes = parse_split_routes()?;
         let preserve_cidrs = env::var("INODE_PRESERVE_CIDRS")
             .ok()
@@ -63,6 +68,7 @@ impl RoutePlan {
             prefix_len,
             mtu,
             dns,
+            dns_mode,
             split_routes,
             preserve_cidrs,
             phys_gateway_override: env::var("INODE_PHYS_GATEWAY").ok(),
@@ -83,13 +89,14 @@ impl RoutePlan {
 
     pub fn describe(&self) -> String {
         format!(
-            "reason={} tun={} tun_ip={:?}/{:?} mtu={:?} dns={:?} split={:?} preserve={:?} vpn_gateway={:?}",
+            "reason={} tun={} tun_ip={:?}/{:?} mtu={:?} dns={:?} dns_mode={} split={:?} preserve={:?} vpn_gateway={:?}",
             self.reason,
             self.tun_iface,
             self.tun_ip,
             self.prefix_len,
             self.mtu,
             self.dns,
+            self.dns_mode,
             self.split_routes,
             self.preserve_cidrs,
             self.vpn_gateway
