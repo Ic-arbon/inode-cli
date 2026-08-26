@@ -40,6 +40,9 @@ enum Command {
         /// Emit the stable JSON schema defined in docs/architecture.md.
         #[arg(long)]
         json: bool,
+        /// Subscribe to daemon events and stream them until interrupted.
+        #[arg(long)]
+        watch: bool,
     },
     /// Show or follow daemon logs.
     Logs {
@@ -309,6 +312,59 @@ fn run_diagnose(socket: Option<PathBuf>, timeout_ms: u64) -> i32 {
     0
 }
 
+/// Subscribe to daemon events and stream `state_changed` snapshots.
+fn run_watch(socket: Option<PathBuf>, timeout_ms: u64, json: bool) -> i32 {
+    let mut stream = match connect(socket, timeout_ms) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    if let Err(e) = ipc::write_line(
+        &mut stream,
+        &Request::with_params(1, "subscribe", json!({})),
+    ) {
+        eprintln!("subscribe failed: {e}");
+        return 1;
+    }
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    match ipc::read_line(&mut reader) {
+        Ok(line) => {
+            let Ok(resp) = serde_json::from_str::<Response>(line.trim()) else {
+                eprintln!("bad subscribe response");
+                return 1;
+            };
+            if let Some(err) = resp.error {
+                eprintln!("subscribe failed: {}", err.message);
+                return 1;
+            }
+        }
+        Err(e) => {
+            eprintln!("subscribe failed: {e}");
+            return 1;
+        }
+    }
+
+    loop {
+        let line = match ipc::read_line(&mut reader) {
+            Ok(l) => l,
+            Err(_) => return 0,
+        };
+        let Ok(event) = serde_json::from_str::<inode_core::ipc::Event>(line.trim()) else {
+            continue;
+        };
+        if event.method == "state_changed" {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&event.params).unwrap());
+            } else if let Ok(status) = serde_json::from_value::<StatusSnapshot>(event.params) {
+                status_text(&status);
+                println!("---");
+            }
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
@@ -335,7 +391,11 @@ fn main() {
             };
             let response = rpc(stream, 1, method, json!({}));
             match command {
-                Command::Status { json } => match response {
+                Command::Status { json, watch } if watch => {
+                    drop(response);
+                    std::process::exit(run_watch(cli.socket.clone(), cli.timeout_ms, json));
+                }
+                Command::Status { json, .. } => match response {
                     Ok(resp) => {
                         let value = unwrap_result(resp, "status");
                         let status: StatusSnapshot =

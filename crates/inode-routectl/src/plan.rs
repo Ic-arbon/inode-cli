@@ -6,7 +6,6 @@
 use crate::Error;
 use crate::Result;
 use std::env;
-use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutePlan {
@@ -160,6 +159,7 @@ pub fn netmask_to_prefix(netmask: &str) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     /// Process env is shared by all test threads; serialise env-mutating tests.
     static ENV_LOCK: Mutex<()> = Mutex::new(());

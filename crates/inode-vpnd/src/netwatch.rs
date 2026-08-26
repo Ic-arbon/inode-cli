@@ -5,7 +5,9 @@
 //! the engine reconnects on the same cookie.
 
 use crate::Shared;
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};

@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "linux")]
+use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod netwatch;
 
@@ -72,6 +74,7 @@ struct Inner {
     target_uid: u32,
     target_gid: u32,
     stop_requested: bool,
+    #[cfg(target_os = "linux")]
     last_net_event: Option<Instant>,
     cmd_fd: Option<RawFd>,
     engine: Option<JoinHandle<()>>,
@@ -100,6 +103,7 @@ impl Shared {
                 target_uid,
                 target_gid,
                 stop_requested: false,
+                #[cfg(target_os = "linux")]
                 last_net_event: None,
                 cmd_fd: None,
                 engine: None,
@@ -204,6 +208,7 @@ impl Shared {
 
     /// Network-change trigger: PAUSE the mainloop so the engine reconnects
     /// on the same cookie. Debounced to collapse `ip monitor` bursts.
+    #[cfg(target_os = "linux")]
     fn network_changed(&self) {
         let (should_pause, cmd_fd) = {
             let mut inner = self.inner.lock().unwrap();
@@ -903,6 +908,30 @@ fn handle_client(shared: Arc<Shared>, stream: UnixStream) {
                 continue;
             }
         };
+
+        if request.method == "subscribe" {
+            let (tx, rx) = mpsc::channel::<Event>();
+            shared.subscribers.lock().unwrap().push(tx.clone());
+            let mut writer = match stream.try_clone() {
+                Ok(w) => w,
+                Err(_) => break,
+            };
+            let response = Response::ok(request.id, serde_json::json!({"subscribed": true}));
+            if ipc::write_line(&mut stream, &response).is_err() {
+                break;
+            }
+            // Push the current snapshot immediately.
+            let _ = tx.send(Event::new("state_changed", shared.snapshot_json()));
+            thread::spawn(move || {
+                for event in rx {
+                    if ipc::write_line(&mut writer, &event).is_err() {
+                        break;
+                    }
+                }
+            });
+            break;
+        }
+
         let response = dispatch(&shared, request);
         if ipc::write_line(&mut stream, &response).is_err() {
             break;

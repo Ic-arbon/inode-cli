@@ -6,10 +6,12 @@ use std::process::Command;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const UNIT_NAME: &str = "inode-vpnd@";
 
+#[allow(dead_code)]
 pub fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+#[allow(dead_code)]
 pub fn unit_name_for(uid: u32) -> String {
     format!("{UNIT_NAME}{uid}.service")
 }
@@ -25,6 +27,7 @@ pub fn stable_exec_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "cannot locate executable directory".to_string())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn unit_text(uid: u32, exec: &Path) -> String {
     format!(
         r#"[Unit]
