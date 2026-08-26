@@ -15,6 +15,7 @@ use serde_json::json;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{BufReader, Write};
 use std::os::fd::RawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -946,6 +947,12 @@ fn run_ipc_server(shared: Arc<Shared>, path: PathBuf) -> Result<()> {
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)
         .map_err(|e| Error::Ipc(format!("bind {} failed: {e}", path.display())))?;
+    // connect(2) requires write permission on the socket inode; bind() leaves
+    // it 0755 under the default umask, which would block the unprivileged
+    // client. World-connectable is safe here because handle_client rejects
+    // every peer whose uid is neither root nor the target user.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+        .map_err(|e| Error::Ipc(format!("chmod {} failed: {e}", path.display())))?;
     tracing::info!(socket = %path.display(), "IPC server listening");
 
     for stream in listener.incoming() {

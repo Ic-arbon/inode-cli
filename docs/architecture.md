@@ -192,10 +192,11 @@ stateDiagram-v2
 
 | 平台 | socket 路径 | 权限 |
 |---|---|---|
-| Linux | `/run/inode-vpn/<uid>/daemon.sock` | 目录 0700（`RuntimeDirectory`） |
-| macOS | `/var/run/inode-vpn/<uid>/daemon.sock` | 目录 0700（LaunchDaemon 创建） |
+| Linux | `/run/inode-vpn/<uid>/daemon.sock` | 父目录 0755（systemd `RuntimeDirectoryMode`）；socket 0666 |
+| macOS | `/var/run/inode-vpn/<uid>/daemon.sock` | 父目录 0755（LaunchDaemon 创建）；socket 0666 |
 
 - 协议：newline-delimited JSON-RPC 2.0。
+- socket 对全系统可 connect（0666）以便目标用户访问；真正的门禁是连接建立后的 peer 校验。
 - 服务端校验：Linux `SO_PEERCRED` 的 uid；macOS `getpeereid()`。只接受 uid == 目标用户或 root。
 - CLI 不连接时 daemon 照常运行；socket 是管理面，不是数据面。
 
