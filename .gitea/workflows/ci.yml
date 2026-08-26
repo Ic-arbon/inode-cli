@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  nix-build:
+    name: nix build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: x86_64-linux
+          - os: ubuntu-24.04-arm
+            label: aarch64-linux
+          - os: macos-13
+            label: x86_64-darwin
+          - os: macos-14
+            label: aarch64-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: Flake check
+        run: nix flake check --print-build-logs
+
+      - name: Build Rust workspace package
+        run: nix build .#inode --print-build-logs --print-out-paths
+
+      - name: Build H3C fork
+        run: nix build .#inode-openconnect --print-build-logs --print-out-paths
+
+      - name: Build legacy vpn package
+        run: nix build .#vpn --print-build-logs --print-out-paths
