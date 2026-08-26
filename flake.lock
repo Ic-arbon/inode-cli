@@ -1,5 +1,20 @@
 {
   "nodes": {
+    "crane": {
+      "locked": {
+        "lastModified": 1787326676,
+        "narHash": "sha256-lWhBbBvC05/xwivKBBiM2YNizpmgqCgyOIzomvRuwxs=",
+        "owner": "ipetkov",
+        "repo": "crane",
+        "rev": "692f7e9ef2ece8125b466f66f2af532b3edaed0d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ipetkov",
+        "repo": "crane",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -51,11 +66,26 @@
         "type": "gitlab"
       }
     },
+    "openconnect-v921-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781609588,
+        "narHash": "sha256-PSiqpddNThhBq93+MX7ydNvnOu3UCBFFj5600ZsP25Q=",
+        "type": "tarball",
+        "url": "https://www.infradead.org/openconnect/download/openconnect-9.21.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://www.infradead.org/openconnect/download/openconnect-9.21.tar.gz"
+      }
+    },
     "root": {
       "inputs": {
+        "crane": "crane",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
-        "openconnect-h3c-src": "openconnect-h3c-src"
+        "openconnect-h3c-src": "openconnect-h3c-src",
+        "openconnect-v921-src": "openconnect-v921-src"
       }
     },
     "systems": {

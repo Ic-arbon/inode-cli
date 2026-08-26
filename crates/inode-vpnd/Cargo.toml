@@ -1,0 +1,17 @@
+[package]
+name = "inode-vpnd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "inode-vpnd"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+inode-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

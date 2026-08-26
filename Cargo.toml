@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/inode",
+  "crates/inode-core",
+  "crates/inode-openconnect-sys",
+  "crates/inode-routectl",
+  "crates/inode-vpnd",
+]
+default-members = ["crates/inode", "crates/inode-vpnd", "crates/inode-routectl"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+inode-core = { path = "crates/inode-core" }
+inode-openconnect-sys = { path = "crates/inode-openconnect-sys" }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "net", "signal", "time", "io-util", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[profile.release]
+lto = "thin"
+strip = true

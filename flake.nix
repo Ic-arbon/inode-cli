@@ -1,11 +1,23 @@
 {
-  description = "OpenConnect with H3C SSL VPN protocol support";
+  description = "inode-vpn: H3C SSL VPN client with persistent service (macOS/Linux)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    crane = {
+      url = "github:ipetkov/crane";
+    };
+
+    # Legacy openconnect fork (upstream v9.01 + MR!397). Kept for the old
+    # `vpn` shell command until the new stack takes over.
     openconnect-h3c-src = {
       url = "gitlab:vimacs.hacks/openconnect/h3cssl";
+      flake = false;
+    };
+
+    # Base source for our own fork.
+    openconnect-v921-src = {
+      url = "https://www.infradead.org/openconnect/download/openconnect-9.21.tar.gz";
       flake = false;
     };
   };
@@ -14,16 +26,18 @@
     self,
     nixpkgs,
     flake-utils,
+    crane,
     openconnect-h3c-src,
+    openconnect-v921-src,
     ...
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
-        overlay = import ./nix/overlay.nix {src = openconnect-h3c-src;};
+        legacyOverlay = import ./nix/overlay.nix {src = openconnect-h3c-src;};
 
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [overlay];
+          overlays = [legacyOverlay];
         };
 
         lib = pkgs.lib;
@@ -42,35 +56,58 @@
         vpn-script = import ./nix/vpn-script.nix {
           inherit pkgs watchLink;
         };
+
+        craneLib = crane.mkLib pkgs;
+
+        inode = import ./nix/inode.nix {
+          inherit pkgs craneLib;
+          src = ./.;
+        };
+
+        inode-openconnect = import ./nix/openconnect-h3c-v921.nix {
+          inherit pkgs;
+          src = openconnect-v921-src;
+        };
+
+        # Transition alias: exposes `vpn` -> `inode` without replacing the
+        # legacy `vpn` shell package yet (full switch happens in M3/M4).
+        vpn-inode = pkgs.runCommand "vpn-inode" {} ''
+          mkdir -p "$out/bin"
+          ln -s ${inode}/bin/inode "$out/bin/vpn"
+        '';
       in {
         packages =
           {
-            default = pkgs.openconnect_h3c;
+            default = inode;
+            inode = inode;
+            inode-openconnect = inode-openconnect;
+            # Legacy packages; keep working until M3/M4 migration is done.
             openconnect-h3c = pkgs.openconnect_h3c;
             vpn = vpn-script;
+            vpn-inode = vpn-inode;
           }
           // lib.optionalAttrs isDarwin {inherit vpn-watch;};
 
         devShells.default = pkgs.mkShell {
-          name = "openconnect-h3c";
+          name = "inode-vpn";
           packages = with pkgs;
             [
-              openconnect_h3c
+              cargo
+              rustc
+              rustfmt
+              clippy
+              inode
+              inode-openconnect
               vpn-script
             ]
             ++ lib.optional isDarwin vpn-watch;
 
           shellHook = ''
-            echo "🔐 VPN 环境就绪 (openconnect-h3c)，仿 systemd 用法"
-            echo "  启动:   vpn start"
-            echo "  停止:   vpn stop"
-            echo "  重启:   vpn restart"
-            echo "  状态:   vpn status"
-            echo "  sudo 免密:    vpn install-sudoers   (macOS，一次性授权)"
-            echo "  开盖自动重连: vpn enable            (macOS，依赖上面的免密)"
-            echo "  装好并立即连: vpn enable --now"
-            echo "  关闭:   vpn disable [--now] / vpn uninstall-sudoers"
-            echo "  或直接: nix run .#vpn -- start"
+            echo "🔐 inode-vpn 开发环境"
+            echo "  新工具:   inode start / stop / restart / status / logs"
+            echo "  旧命令:   vpn start ...（过渡兼容，M3/M4 后由 inode 接管）"
+            echo "  构建:     cargo build --workspace"
+            echo "  fork:     openconnect --protocol=h3c ..."
           '';
         };
 
