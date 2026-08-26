@@ -68,7 +68,16 @@ pub struct StatusSnapshot {
     pub stats: Option<Stats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthStatus>,
     pub service: ServiceStatus,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HealthStatus {
+    pub checkonline_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

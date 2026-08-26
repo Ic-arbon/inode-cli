@@ -6,15 +6,18 @@
 use clap::Parser;
 use inode_core::ipc::{self, Event, Request, Response};
 use inode_core::redact::Redactor;
-use inode_core::state::{ServiceStatus, SessionInfo, SessionState, Stats, StatusSnapshot};
+use inode_core::state::{
+    HealthStatus, ServiceStatus, SessionInfo, SessionState, Stats, StatusSnapshot,
+};
 use inode_core::{Config, Error, Result};
 use inode_openconnect_sys::ffi as oc;
 use serde_json::json;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::os::fd::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -51,6 +54,8 @@ struct Shared {
     inner: Arc<Mutex<Inner>>,
     subscribers: Arc<Mutex<Vec<mpsc::Sender<Event>>>>,
     redactor: Arc<Mutex<Redactor>>,
+    health_stop: Arc<AtomicBool>,
+    health_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 struct Inner {
@@ -60,6 +65,8 @@ struct Inner {
     gateway: Option<String>,
     session: Option<SessionInfo>,
     stats: Stats,
+    health: Option<HealthStatus>,
+    cookie: Option<String>,
     config_path: PathBuf,
     config: Option<Config>,
     target_uid: u32,
@@ -86,6 +93,8 @@ impl Shared {
                 gateway: None,
                 session: None,
                 stats: Stats::default(),
+                health: None,
+                cookie: None,
                 config_path,
                 config: None,
                 target_uid,
@@ -98,6 +107,8 @@ impl Shared {
             })),
             subscribers: Arc::new(Mutex::new(Vec::new())),
             redactor: Arc::new(Mutex::new(Redactor::default())),
+            health_stop: Arc::new(AtomicBool::new(false)),
+            health_thread: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -241,6 +252,7 @@ impl Shared {
             session: inner.session.clone(),
             stats: Some(inner.stats),
             last_error: inner.last_error.clone(),
+            health: inner.health.clone(),
             service: ServiceStatus {
                 supervisor: if cfg!(target_os = "macos") {
                     "launchd".into()
@@ -265,6 +277,49 @@ impl Shared {
         let mut r = self.redactor.lock().unwrap();
         r.add(config.credentials.password.clone());
         r.add(config.credentials.username.clone());
+    }
+
+    fn cookie(&self) -> Option<String> {
+        self.inner.lock().unwrap().cookie.clone()
+    }
+
+    fn set_cookie(&self, cookie: String) {
+        self.inner.lock().unwrap().cookie = Some(cookie);
+    }
+
+    fn clear_cookie(&self) {
+        self.inner.lock().unwrap().cookie = None;
+    }
+
+    fn set_health(&self, ok: bool) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.health = Some(HealthStatus {
+                checkonline_ok: ok,
+                last_check: Some(Self::now()),
+            });
+        }
+        self.emit("health", self.snapshot_json());
+    }
+
+    fn start_health(self: &Arc<Self>, gateway: String, interval_secs: u64) {
+        self.health_stop.store(false, Ordering::SeqCst);
+        let shared = Arc::clone(self);
+        let interval = interval_secs.max(5);
+        let handle = thread::Builder::new()
+            .name("inode-health".into())
+            .spawn(move || health_loop(shared, gateway, interval))
+            .expect("spawn health thread");
+        *self.health_thread.lock().unwrap() = Some(handle);
+    }
+
+    fn stop_health(&self) {
+        self.health_stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.health_thread.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        self.inner.lock().unwrap().health = None;
+        self.clear_cookie();
     }
 
     /// Spawn the engine thread for `config`. Returns Ok(()) if accepted.
@@ -402,6 +457,65 @@ fn cstring(s: &str) -> Result<CString> {
     CString::new(s).map_err(|_| Error::OpenConnect("string contains NUL".into()))
 }
 
+fn checkonline_url(gateway: &str) -> String {
+    format!("https://{gateway}/_xml/checkonline.cgi")
+}
+
+/// `curl -b -` reads a Netscape cookie file from stdin, so the svpnginfo
+/// cookie never appears in argv or logs.
+fn curl_checkonline(gateway: &str, cookie: &str) -> bool {
+    let Some((_, value)) = cookie.split_once('=') else {
+        return false;
+    };
+    let host = gateway.split(':').next().unwrap_or(gateway);
+    let cookie_file = format!("{host}\tFALSE\t/\tFALSE\t0\tsvpnginfo\t{value}\n");
+    let url = checkonline_url(gateway);
+
+    let Ok(mut child) = std::process::Command::new("curl")
+        .args([
+            "-ks",
+            "--max-time",
+            "5",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-b",
+            "-",
+            &url,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(cookie_file.as_bytes());
+    }
+    let Ok(output) = child.wait_with_output() else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout).trim() == "200"
+}
+
+fn health_loop(shared: Arc<Shared>, gateway: String, interval_secs: u64) {
+    let interval = std::time::Duration::from_secs(interval_secs);
+    while !shared.health_stop.load(Ordering::SeqCst) {
+        thread::sleep(interval);
+        if shared.health_stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let Some(cookie) = shared.cookie() else {
+            continue;
+        };
+        let ok = curl_checkonline(&gateway, &cookie);
+        tracing::debug!(ok, "checkonline probe");
+        shared.set_health(ok);
+    }
+}
+
 fn engine_run(shared: Arc<Shared>, config: Config, tun_script: Option<String>) {
     let _guard = EngineGuard(Arc::clone(&shared));
     shared.set_state(SessionState::Authenticating, None);
@@ -509,6 +623,19 @@ fn engine_run(shared: Arc<Shared>, config: Config, tun_script: Option<String>) {
             return Err(Error::OpenConnect(format!("authentication failed ({ret})")));
         }
 
+        // Copy the session cookie for the checkonline health probe and
+        // register it for redaction. Never log or expose the value itself.
+        let cookie_ptr = oc::openconnect_get_cookie(vpninfo);
+        if !cookie_ptr.is_null() {
+            let cookie = CStr::from_ptr(cookie_ptr).to_string_lossy().into_owned();
+            shared.redactor.lock().unwrap().add(cookie.clone());
+            shared.set_cookie(cookie);
+        }
+        shared.start_health(
+            config.gateway.url.clone(),
+            config.network.keepalive.seconds(30),
+        );
+
         shared.set_state(SessionState::Connecting, None);
         tracing::info!("engine: make_cstp_connection");
         ret = oc::openconnect_make_cstp_connection(vpninfo);
@@ -607,6 +734,8 @@ fn engine_run(shared: Arc<Shared>, config: Config, tun_script: Option<String>) {
 
         Ok(())
     })();
+
+    shared.stop_health();
 
     unsafe {
         if !ctx.vpninfo.is_null() {

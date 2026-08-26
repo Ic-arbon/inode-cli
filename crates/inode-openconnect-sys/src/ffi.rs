@@ -126,6 +126,7 @@ unsafe extern "C" {
         fingerprint: *const c_char,
     ) -> c_int;
     pub fn openconnect_get_peer_cert_hash(vpninfo: *mut OpenConnectInfo) -> *const c_char;
+    pub fn openconnect_get_cookie(vpninfo: *mut OpenConnectInfo) -> *const c_char;
     pub fn openconnect_obtain_cookie(vpninfo: *mut OpenConnectInfo) -> c_int;
     pub fn openconnect_make_cstp_connection(vpninfo: *mut OpenConnectInfo) -> c_int;
     pub fn openconnect_get_ip_info(
