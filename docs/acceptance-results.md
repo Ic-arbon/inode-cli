@@ -17,7 +17,11 @@
 | A39 | systemd 安全基线 | Linux | ✅ | `systemd-analyze security` 4.5 `OK`；capability 白名单生效（DAC/CHOWN/SETFCAP 等 ✓） |
 | A30 | 崩溃恢复 | Linux | ✅ | `kill -9 MainPID` 后 systemd 5s 内拉起，12s 内自动重连 `connected`（新 IP） |
 | 24h soak | 发布门槛 | Linux | ⏳ | 运行中；当前无未自愈错误 |
-| A31–A33/A36/A38 | macOS | — | ⏳ | 待执行（LaunchDaemon 安装、utun 路由、合盖/换网） |
+| A31 | 管理面保活 | macOS (arm64) | ✅ | `sudo launchctl kickstart -k system/cc.inode.vpn-daemon` 后自动恢复 `connected` |
+| A33 | 路由撤销 | macOS | ✅ | `inode stop` 后 `netstat -rn` 中 inode 的 utun 路由全部消失 |
+| A29 | 零泄密 | macOS | ✅ | `/var/log/inode-vpn.log`/`.err` grep 密码 = ok；`inode diagnose` grep `svpnginfo=` = ok |
+| A36 | 网络变化自愈 | macOS | ✅ | 关 Wi-Fi 60s 再打开后 120s 内恢复 `connected`；日志 `network change detected; reconnecting` + `openconnect session reconnected` |
+| A38 | 合盖唤醒自愈 | macOS | ⏳ | 合盖 5 分钟开盖后需在 120s 内恢复 `connected` |
 | T0.4/A6 | 四平台 CI | — | ⏳ | 以 `.github/workflows/ci.yml` 在 GitHub Actions 上跑四平台（用户确认以 GitHub CI 为准） |
 
 ## 关键修复（本验收轮）
@@ -30,10 +34,15 @@
 - `inode-routectl` 从 `reason` 环境变量取 phase（openconnect 经 `sh -c` exec），支持 `attempt-reconnect`。
 - 物理前缀归一化为网络地址（`192.168.0.128/23` → `192.168.0.0/23`）再执行 `ip route replace`。
 - netwatch 只监听物理接口 address/link，忽略 tun/lo，避免自家路由触发重连风暴。
+- macOS netwatch 基于 SystemConfiguration dynamic store（Global/IPv4、Service/IPv4、接口 Link），过滤 utun/lo0/awdl 等虚拟接口。
+- 网络恢复时：运行中引擎发 `OC_CMD_PAUSE` 立即重连；已 `failed` 的引擎用已存配置自动重启（覆盖断网超过 reconnect 窗口的场景）。
+- macOS `inode-routectl` `pre-init` 删除旧 VPN 网关主机路由，避免换网后 `connect()` 报 `EADDRNOTAVAIL`。
 - `enable` 注册真实 Nix gc-root `/nix/var/nix/gcroots/inode-vpn-<uid>`。
 
 ## 执行环境
 
 - Linux 真机：OB714，Fedora 44，systemd 259，x86_64，用户 tyd(uid 1000)。
+- macOS 真机：Apple Silicon，LaunchDaemon `cc.inode.vpn-daemon`，用户 tyd(uid 501)。
 - 网关：H3C `140.206.103.26:2000`；会话隧道 `10.1.1.0/24`，keepalive 30s。
-- 受测包：`/nix/store/46yymn3vqk9pa9qxxykznnpf6qmfsd8j-inode-0.1.0`（commit 71221df）。
+- Linux 受测包：`/nix/store/46yymn3vqk9pa9qxxykznnpf6qmfsd8j-inode-0.1.0`（commit 71221df）。
+- macOS 受测包：`/nix/store/z3pr79482i4xici7z7bvqnmc026r5z6f-inode-0.1.0`（commit 4ecadf9）。

@@ -197,18 +197,27 @@ netstat -rn -f inet
 
 **通过标准**：SSH 不断；会话路由出现后消失。
 
-### 2.4 A38 合盖唤醒 / 换网自愈
+### 2.4 A36 断网自愈（关 Wi-Fi）
 
 ```sh
-# 合盖 5 分钟后开盖；或切换 Wi-Fi
-sleep 30
+# 关 Wi-Fi 60s，再打开；等网络恢复后等待 120s
 /tmp/inode-result/bin/inode status --json
 tail -50 /var/log/inode-vpn.log
 ```
 
-**通过标准**：30–120s 内恢复 `connected`。
+**通过标准**：120s 内恢复 `connected`；日志出现 `network change detected; reconnecting` 与 `openconnect session reconnected`。
 
-### 2.5 A29 零泄密
+### 2.5 A38 合盖唤醒自愈
+
+```sh
+# 合盖 5 分钟后开盖，等 120s
+/tmp/inode-result/bin/inode status --json
+tail -50 /var/log/inode-vpn.log
+```
+
+**通过标准**：120s 内恢复 `connected`；若之前引擎已 failed，日志出现 `restarting failed engine`。
+
+### 2.6 A29 零泄密
 
 ```sh
 PASS=$(sed -n 's/^password=//p' .auth)
