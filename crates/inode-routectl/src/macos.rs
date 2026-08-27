@@ -19,7 +19,7 @@ struct PhysicalState {
 pub fn apply(plan: &RoutePlan) -> Result<()> {
     match plan.reason.as_str() {
         "pre-init" => Ok(()),
-        "connect" | "reconnect" => connect(plan),
+        "connect" | "reconnect" | "attempt-reconnect" => connect(plan),
         "disconnect" => disconnect(plan),
         other => Err(Error::Route(format!("unsupported reason: {other}"))),
     }
