@@ -64,6 +64,7 @@ LimitNOFILE=65536
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
 AmbientCapabilities=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
 NoNewPrivileges=yes
+UMask=0027
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
@@ -269,6 +270,7 @@ mod tests {
         assert!(text.contains("CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID"));
         assert!(text.contains("ProtectSystem=strict"));
         assert!(text.contains("ProtectHome=read-only"));
+        assert!(text.contains("UMask=0027"));
     }
 
     #[test]
