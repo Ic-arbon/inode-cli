@@ -76,7 +76,10 @@ impl RoutePlan {
     }
 
     pub fn is_up_phase(&self) -> bool {
-        matches!(self.reason.as_str(), "connect" | "reconnect")
+        matches!(
+            self.reason.as_str(),
+            "connect" | "reconnect" | "attempt-reconnect"
+        )
     }
 
     pub fn tun_cidr(&self) -> Option<String> {

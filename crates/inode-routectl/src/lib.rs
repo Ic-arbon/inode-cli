@@ -11,7 +11,13 @@ pub mod plan;
 use inode_core::{Error, Result};
 use std::env;
 
-pub const SUPPORTED_REASONS: &[&str] = &["pre-init", "connect", "reconnect", "disconnect"];
+pub const SUPPORTED_REASONS: &[&str] = &[
+    "pre-init",
+    "connect",
+    "reconnect",
+    "attempt-reconnect",
+    "disconnect",
+];
 
 /// Parse the vpnc-script environment and run one phase.
 pub fn run(reason: &str) -> Result<()> {
