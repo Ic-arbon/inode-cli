@@ -1053,7 +1053,7 @@ async fn main() {
         Err(e) => tracing::warn!(error = %e, "config not loaded at startup; autostart skipped"),
     }
 
-    let ipc_thread = {
+    let _ipc_thread = {
         let shared = Arc::clone(&shared_ipc);
         let path = socket_path.clone();
         thread::spawn(move || {
@@ -1083,9 +1083,15 @@ async fn main() {
 
     tracing::info!("shutdown requested");
     shared_ipc.request_stop();
-    let _ = ipc_thread.join();
+    if shared_ipc.wait_for_engine_finish(std::time::Duration::from_secs(15)) {
+        tracing::info!("engine stopped cleanly");
+    } else {
+        tracing::warn!("engine did not stop before shutdown deadline");
+    }
+    // Do not join the IPC listener: `UnixListener::incoming()` never returns
+    // on its own, and joining it would hang shutdown until systemd sends
+    // SIGKILL/SIGABRT. Exiting main() terminates the process and all threads.
     let _ = std::fs::remove_file(socket_path);
-    let _ = state_file_for(&config_path);
 }
 
 impl Cli {
