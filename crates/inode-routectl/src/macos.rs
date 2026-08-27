@@ -18,7 +18,18 @@ struct PhysicalState {
 
 pub fn apply(plan: &RoutePlan) -> Result<()> {
     match plan.reason.as_str() {
-        "pre-init" => Ok(()),
+        // A previous engine may have died without running the vpnc-script
+        // disconnect phase (sleep, forced kill, reconnect timeout). Its
+        // host route for the VPN gateway can point at an unreachable old
+        // next hop, which makes every new connect() fail with
+        // EADDRNOTAVAIL ("Can't assign requested address"). Delete it
+        // before openconnect opens the HTTPS socket.
+        "pre-init" => {
+            if let Some(gw) = &plan.vpn_gateway {
+                let _ = run(&["delete", "-host", gw]);
+            }
+            Ok(())
+        }
         "connect" | "reconnect" | "attempt-reconnect" => connect(plan),
         "disconnect" => disconnect(plan),
         other => Err(Error::Route(format!("unsupported reason: {other}"))),

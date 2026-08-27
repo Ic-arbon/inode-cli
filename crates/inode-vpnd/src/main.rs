@@ -74,7 +74,6 @@ struct Inner {
     target_uid: u32,
     target_gid: u32,
     stop_requested: bool,
-    #[cfg(target_os = "linux")]
     last_net_event: Option<Instant>,
     cmd_fd: Option<RawFd>,
     engine: Option<JoinHandle<()>>,
@@ -103,7 +102,6 @@ impl Shared {
                 target_uid,
                 target_gid,
                 stop_requested: false,
-                #[cfg(target_os = "linux")]
                 last_net_event: None,
                 cmd_fd: None,
                 engine: None,
@@ -221,11 +219,22 @@ impl Shared {
         }
     }
 
-    /// Network-change trigger: PAUSE the mainloop so the engine reconnects
-    /// on the same cookie. Debounced to collapse `ip monitor` bursts.
-    #[cfg(target_os = "linux")]
-    fn network_changed(&self) {
-        let (should_pause, cmd_fd) = {
+    /// Network-change trigger.
+    ///
+    /// * Running engine: send OC_CMD_PAUSE so the mainloop reconnects on the
+    ///   same cookie. This is the fast path for a brief outage.
+    /// * Failed engine: start a fresh engine from the stored config. This
+    ///   recovers after an outage longer than openconnect's reconnect window
+    ///   (the H3C DPD path gives up after `reconnect_timeout`).
+    ///
+    /// Debounced to collapse network-change bursts.
+    fn network_changed(self: &Arc<Self>) {
+        enum NetAction {
+            Pause(RawFd),
+            Restart(Config),
+        }
+
+        let action = {
             let mut inner = self.inner.lock().unwrap();
             let now = Instant::now();
             if inner
@@ -235,25 +244,39 @@ impl Shared {
             {
                 return;
             }
-            if !matches!(
+            inner.last_net_event = Some(now);
+
+            if matches!(
                 inner.state,
                 SessionState::Connected | SessionState::Reconnecting
-            ) || inner.cmd_fd.is_none()
-            {
+            ) {
+                match inner.cmd_fd {
+                    Some(fd) => NetAction::Pause(fd),
+                    None => return,
+                }
+            } else if inner.state == SessionState::Failed && inner.engine.is_none() {
+                match inner.config.clone() {
+                    Some(config) => NetAction::Restart(config),
+                    None => return,
+                }
+            } else {
                 return;
             }
-            inner.last_net_event = Some(now);
-            (true, inner.cmd_fd)
         };
-        if should_pause {
-            self.set_state(SessionState::Reconnecting, None);
-            if let Some(fd) = cmd_fd {
+
+        match action {
+            NetAction::Pause(fd) => {
+                self.set_state(SessionState::Reconnecting, None);
                 let byte = [oc::OC_CMD_PAUSE];
                 unsafe {
                     libc::write(fd, byte.as_ptr() as *const c_void, 1);
                 }
+                tracing::info!("network change detected; reconnecting");
             }
-            tracing::info!("network change detected; reconnecting");
+            NetAction::Restart(config) => match self.engine_start(config) {
+                Ok(()) => tracing::info!("network change detected; restarting failed engine"),
+                Err(e) => tracing::warn!("network-triggered engine restart failed: {e}"),
+            },
         }
     }
 
