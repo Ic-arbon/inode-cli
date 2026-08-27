@@ -260,11 +260,29 @@ fn parse_local_addr(iface: &str) -> Result<Option<(String, String)>> {
             if word == "inet" {
                 let cidr = words.next().unwrap_or_default();
                 let (ip, prefix) = cidr.split_once('/').unwrap_or((cidr, ""));
-                return Ok(Some((ip.to_string(), format!("{ip}/{prefix}"))));
+                return Ok(Some((ip.to_string(), network_cidr(ip, prefix))));
             }
         }
     }
     Ok(None)
+}
+
+/// Normalise `192.168.0.128/23` to `192.168.0.0/23`; `ip route replace`
+/// rejects prefixes whose host bits are non-zero.
+fn network_cidr(ip: &str, prefix: &str) -> String {
+    let bits = prefix.parse::<u32>().unwrap_or(32).min(32);
+    match ip.parse::<std::net::Ipv4Addr>() {
+        Ok(addr) => {
+            let host = u32::from(addr);
+            let mask = if bits == 0 {
+                0
+            } else {
+                u32::MAX << (32 - bits)
+            };
+            format!("{}/{bits}", std::net::Ipv4Addr::from(host & mask))
+        }
+        Err(_) => format!("{ip}/{prefix}"),
+    }
 }
 
 fn apply_dns(plan: &RoutePlan) {
@@ -303,6 +321,14 @@ fn revert_dns(plan: &RoutePlan) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_cidr_normalises_host_bits() {
+        assert_eq!(network_cidr("192.168.0.128", "23"), "192.168.0.0/23");
+        assert_eq!(network_cidr("10.1.2.3", "24"), "10.1.2.0/24");
+        assert_eq!(network_cidr("10.1.2.3", "0"), "0.0.0.0/0");
+        assert_eq!(network_cidr("10.1.2.3", "33"), "10.1.2.3/32");
+    }
 
     #[test]
     fn state_round_trip() {
