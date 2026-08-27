@@ -53,7 +53,8 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=root
+User={uid}
+Group={uid}
 ExecStart={exec} --uid {uid}
 RuntimeDirectory=inode-vpn
 RuntimeDirectoryMode=0755
@@ -258,6 +259,8 @@ mod tests {
     fn unit_text_contains_stable_contract() {
         let text = unit_text(501, Path::new("/var/lib/inode-vpn/current/bin/inode-vpnd"));
         assert!(text.contains("Description=inode-vpn daemon (user 501)"));
+        assert!(text.contains("User=501"));
+        assert!(text.contains("Group=501"));
         assert!(text.contains("ExecStart=/var/lib/inode-vpn/current/bin/inode-vpnd --uid 501"));
         assert!(text.contains("Restart=always"));
         assert!(text.contains("RuntimeDirectory=inode-vpn"));
