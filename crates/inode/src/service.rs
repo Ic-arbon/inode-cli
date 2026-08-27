@@ -64,10 +64,20 @@ LimitNOFILE=65536
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
 AmbientCapabilities=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
 NoNewPrivileges=yes
-UMask=0027
+UMask=0077
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
 ReadWritePaths=/run/inode-vpn
 
 [Install]
@@ -270,7 +280,9 @@ mod tests {
         assert!(text.contains("CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID"));
         assert!(text.contains("ProtectSystem=strict"));
         assert!(text.contains("ProtectHome=read-only"));
-        assert!(text.contains("UMask=0027"));
+        assert!(text.contains("UMask=0077"));
+        assert!(text.contains("ProtectKernelTunables=yes"));
+        assert!(text.contains("RestrictNamespaces=yes"));
     }
 
     #[test]
