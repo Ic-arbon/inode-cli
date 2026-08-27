@@ -270,28 +270,43 @@ restart_delay = 10        # 失败重试间隔（秒）
 
 ### 9.1 Linux（现代 Linux，systemd）
 
-`inode enable` 生成：
+`inode enable` 生成实例 unit（`%i = uid`）：
 
 ```ini
-# /etc/systemd/system/inode-vpnd@.service（模板，%i = uid）
+# /etc/systemd/system/inode-vpnd@<uid>.service
 [Unit]
-Description=inode-vpn daemon (user %i)
+Description=inode-vpn daemon (user <uid>)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-User=root
-ExecStart=/var/lib/inode-vpn/current/bin/inode-vpnd --uid %i
+User=<uid>
+Group=<uid>
+ExecStart=/var/lib/inode-vpn/current/bin/inode-vpnd --uid <uid>
 RuntimeDirectory=inode-vpn
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0755
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
-# 安全收敛（分阶段启用）
-# CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
-# ProtectSystem=strict
-# ReadWritePaths=/run/inode-vpn
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_ADMIN CAP_SETUID CAP_SETGID
+NoNewPrivileges=yes
+UMask=0077
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/run/inode-vpn
 
 [Install]
 WantedBy=multi-user.target
@@ -299,9 +314,11 @@ WantedBy=multi-user.target
 
 要点：
 
+- 服务以**目标用户**身份运行，通过 `AmbientCapabilities` 只授 `CAP_NET_ADMIN/CAP_SETUID/CAP_SETGID`，无需 DAC bypass 去读用户 0600 配置。
 - ExecStart 指向 **stable gc-root 符号链接**，绝不写 `/nix/store/...hash`。
+- `enable` 同时注册真正的 Nix gc-root：`/nix/var/nix/gcroots/inode-vpn-<uid> -> <package>`；`nix-collect-garbage` 后 `current` 目标仍存活。
 - 日志走 journald；`inode logs` 转 `journalctl -u inode-vpnd@<uid>`。
-- daemon 用 rtnetlink 监听 link/addr/route 事件，作为重连触发器之一。
+- daemon 用 rtnetlink 监听物理接口 link/addr 事件（忽略 tun/lo），作为重连触发器。
 
 ### 9.2 macOS（launchd）
 
@@ -354,7 +371,7 @@ packages
 nixosModules.inode-vpn   # 可选：NixOS module
 ```
 
-- 服务安装命令创建 `/var/lib/inode-vpn/current` 稳定链接（`nix build --out-link`），unit/plist 只引用该链接。
+- 服务安装命令创建 `/var/lib/inode-vpn/current` 稳定链接，并注册 `/nix/var/nix/gcroots/inode-vpn-<uid>`；unit/plist 只引用 `current`。
 - dev shell 保持旧习惯：`inode` 与兼容的 `vpn` 均可用。
 - CI 目标：`x86_64-linux`、`aarch64-linux`、`aarch64-darwin`、`x86_64-darwin`。
 
@@ -362,9 +379,9 @@ nixosModules.inode-vpn   # 可选：NixOS module
 
 ## 12. 安全模型
 
-- daemon 以 root 启动，仅保留必要 capabilities（Linux）/ 后续 sandbox（macOS）。
-- 会话建立后经 fork 的 `drop-uid` 降到目标用户，数据面不再以 root 运行。
-- 管理 socket 仅接受同 uid 或 root；目录 0700。
+- daemon 以目标用户运行，仅 ambient `CAP_NET_ADMIN/CAP_SETUID/CAP_SETGID`；systemd sandbox（ProtectSystem=strict、ProtectHome=read-only、内核保护项等）进一步收敛。
+- 会话建立后经 fork 的 `drop-uid` 降到目标用户，数据面不保留多余权限。
+- 管理 socket 0666 可 connect，真正的门禁是 SO_PEERCRED/getpeereid：仅接受目标 uid 或 root；父目录 0755。
 - 密码/cookie 脱敏清单在日志层统一执行，diagnose 强制二次过滤。
 - 证书：TOFU 记录 `pin-sha256`（SPKI），pin 变化必须显式确认。
 
