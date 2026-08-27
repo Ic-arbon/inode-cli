@@ -6,7 +6,7 @@
 
 - [ ] `dev/inode-vpn` 分支 HEAD 干净（除 `.auth`/`.auth.example` 等本地文件）
 - [ ] `nix flake check` 四平台通过（x86_64-linux / aarch64-linux / x86_64-darwin / aarch64-darwin）
-- [ ] `nix build .#inode .#inode-openconnect .#vpn .#vpn-inode` 通过
+- [ ] `nix build .#inode .#inode-openconnect` 通过
 - [ ] `cargo test --workspace` 全绿
 - [ ] `cargo clippy --workspace --all-targets` 无 error（warning 可记录）
 - [ ] CI runner 记录四平台构建结果
@@ -30,8 +30,7 @@
 - [ ] `docs/architecture.md` 与代码一致
 - [ ] `docs/acceptance-runbook.md` 可用
 - [ ] `README.md` 覆盖安装 / 迁移 / 使用 / 安全
-- [ ] 旧 `vpn` 包仍可构建，作为回退路径
-- [ ] `vpn-inode` 别名指向 `inode` 已验证
+- [ ] legacy `vpn` shell / `vpn-watch` / `vpn-inode` 已从 flake 移除（v1.0 只提供 `inode`）
 
 ## 发布操作
 

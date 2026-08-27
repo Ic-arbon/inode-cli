@@ -1,6 +1,5 @@
 .auth
 result
 .claude
-openconnect-h3c
 run/
 /target/

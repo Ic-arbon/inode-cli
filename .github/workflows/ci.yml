@@ -35,6 +35,3 @@ jobs:
 
       - name: Build H3C fork
         run: nix build .#inode-openconnect --print-build-logs --print-out-paths
-
-      - name: Build legacy vpn package
-        run: nix build .#vpn --print-build-logs --print-out-paths
