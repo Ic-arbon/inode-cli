@@ -18,7 +18,7 @@
 | A30 | 崩溃恢复 | Linux | ✅ | `kill -9 MainPID` 后 systemd 5s 内拉起，12s 内自动重连 `connected`（新 IP） |
 | 24h soak | 发布门槛 | Linux | ⏳ | 运行中；当前无未自愈错误 |
 | A31–A33/A36/A38 | macOS | — | ⏳ | 待执行（LaunchDaemon 安装、utun 路由、合盖/换网） |
-| T0.4/A6 | 四平台 CI | — | ⏳ | 待 Gitea CI runner 产出结果 |
+| T0.4/A6 | 四平台 CI | — | ⏳ | 以 `.github/workflows/ci.yml` 在 GitHub Actions 上跑四平台（用户确认以 GitHub CI 为准） |
 
 ## 关键修复（本验收轮）
 
