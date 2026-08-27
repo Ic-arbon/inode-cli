@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-#[cfg(target_os = "linux")]
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -190,6 +189,21 @@ impl Shared {
 
     fn set_engine(&self, handle: Option<JoinHandle<()>>) {
         self.inner.lock().unwrap().engine = handle;
+    }
+
+    /// Wait until the engine thread has dropped its handle (normal exit or
+    /// panic). Returns false if it is still running after `timeout`.
+    fn wait_for_engine_finish(&self, timeout: std::time::Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.inner.lock().unwrap().engine.is_none() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     fn stop_requested(&self) -> bool {
@@ -847,7 +861,9 @@ fn dispatch(shared: &Arc<Shared>, request: Request) -> Response {
         }
         "restart" => {
             shared.request_stop();
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            if !shared.wait_for_engine_finish(std::time::Duration::from_secs(30)) {
+                return Response::err(request.id, -32003, "engine did not stop in time");
+            }
             match load_config_for_daemon(shared) {
                 Ok(config) => match shared.engine_start(config) {
                     Ok(()) => Response::ok(request.id, serde_json::json!({"accepted": true})),
