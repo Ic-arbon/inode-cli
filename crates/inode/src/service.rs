@@ -108,24 +108,34 @@ fn stable_root_for(exec: &Path) -> Result<&Path, String> {
         .ok_or_else(|| format!("executable path has no parent: {}", exec.display()))
 }
 
+fn gcroot_name_for(uid: u32) -> String {
+    format!("inode-vpn-{uid}")
+}
+
 /// Create `/var/lib/inode-vpn/current -> <package root containing bin/>` so
 /// the unit's `/var/lib/inode-vpn/current/bin/inode-vpnd` stays stable and
 /// never references a GC-able /nix/store path.
-pub fn install_stable_link(exec: &Path) -> Result<(), String> {
+///
+/// The same target is also registered under `/nix/var/nix/gcroots`, because
+/// `nix-collect-garbage` only treats symlinks there as roots; a symlink in
+/// `/var/lib` alone would not keep the package alive.
+pub fn install_stable_link(uid: u32, exec: &Path) -> Result<(), String> {
     let root_dir = stable_root_for(exec)?;
+    let target = root_dir.to_str().ok_or("non-UTF8 exec path")?;
     sudo(&["mkdir", "-p", "/var/lib/inode-vpn"])?;
+    sudo(&["ln", "-sfn", target, "/var/lib/inode-vpn/current"])?;
     sudo(&[
         "ln",
         "-sfn",
-        root_dir.to_str().ok_or("non-UTF8 exec path")?,
-        "/var/lib/inode-vpn/current",
+        target,
+        &format!("/nix/var/nix/gcroots/{}", gcroot_name_for(uid)),
     ])
 }
 
 #[cfg(target_os = "linux")]
 pub fn enable(uid: u32, now: bool) -> Result<(), String> {
     let bin_dir = stable_exec_path()?;
-    install_stable_link(&bin_dir)?;
+    install_stable_link(uid, &bin_dir)?;
     let exec = PathBuf::from("/var/lib/inode-vpn/current/bin/inode-vpnd");
     let unit = unit_text(uid, &exec);
 
@@ -193,7 +203,7 @@ pub fn plist_text(uid: u32, exec: &Path) -> String {
 #[cfg(target_os = "macos")]
 pub fn enable(uid: u32, now: bool) -> Result<(), String> {
     let bin_dir = stable_exec_path()?;
-    install_stable_link(&bin_dir)?;
+    install_stable_link(uid, &bin_dir)?;
     let exec = PathBuf::from("/var/lib/inode-vpn/current/bin/inode-vpnd");
     let plist = plist_text(uid, &exec);
 
@@ -307,6 +317,7 @@ mod tests {
             Path::new("/nix/store/x-inode-0.1.0")
         );
         assert!(stable_root_for(Path::new("/")).is_err());
+        assert_eq!(gcroot_name_for(1000), "inode-vpn-1000");
     }
 
     #[cfg(target_os = "macos")]
