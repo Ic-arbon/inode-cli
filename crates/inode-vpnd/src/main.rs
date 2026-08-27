@@ -1026,14 +1026,17 @@ async fn main() {
     let shared_ipc = Arc::new(shared.clone());
 
     // Daemon startup: restore desired state when autostart is enabled.
-    if let Ok(config) = Config::load(&config_path) {
-        if config.service.autostart {
-            tracing::info!(autostart = true, "restoring VPN state");
-            shared_ipc.add_redaction_secrets(&config);
-            if let Err(e) = shared_ipc.engine_start(config) {
-                tracing::error!("autostart failed: {e}");
+    match Config::load(&config_path) {
+        Ok(config) => {
+            if config.service.autostart {
+                tracing::info!(autostart = true, "restoring VPN state");
+                shared_ipc.add_redaction_secrets(&config);
+                if let Err(e) = shared_ipc.engine_start(config) {
+                    tracing::error!("autostart failed: {e}");
+                }
             }
         }
+        Err(e) => tracing::warn!(error = %e, "config not loaded at startup; autostart skipped"),
     }
 
     let ipc_thread = {
