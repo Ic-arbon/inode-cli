@@ -311,10 +311,10 @@ mod tests {
     #[test]
     fn stable_link_targets_package_root() {
         // stable_exec_path() yields the directory containing the binary.
-        let bin_dir = Path::new("/nix/store/x-inode-0.1.0/bin");
+        let bin_dir = Path::new("/nix/store/x-inode-1.0.0/bin");
         assert_eq!(
             stable_root_for(bin_dir).unwrap(),
-            Path::new("/nix/store/x-inode-0.1.0")
+            Path::new("/nix/store/x-inode-1.0.0")
         );
         assert!(stable_root_for(Path::new("/")).is_err());
         assert_eq!(gcroot_name_for(1000), "inode-vpn-1000");
