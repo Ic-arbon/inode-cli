@@ -22,7 +22,7 @@
 | A29 | 零泄密 | macOS | ✅ | `/var/log/inode-vpn.log`/`.err` grep 密码 = ok；`inode diagnose` grep `svpnginfo=` = ok |
 | A36 | 网络变化自愈 | macOS | ✅ | 关 Wi-Fi 60s 再打开后 120s 内恢复 `connected`；日志 `network change detected; reconnecting` + `openconnect session reconnected` |
 | A38 | 合盖唤醒自愈 | macOS | ✅ | 合盖 5 分钟开盖后 120s 内恢复 `connected`；日志 `Dead Peer Detection` → `network change detected` → `openconnect session reconnected`（约 1s） |
-| T0.4/A6 | 四平台 CI | — | ⏳ | 以 `.github/workflows/ci.yml` 在 GitHub Actions 上跑四平台（用户确认以 GitHub CI 为准） |
+| T0.4/A6 | 四平台 CI | — | ✅ | GitHub Actions `Ic-arbon/inode-cli` run `33136284956` 四平台全绿：x86_64-linux / aarch64-linux / x86_64-darwin / aarch64-darwin |
 
 ## 关键修复（本验收轮）
 

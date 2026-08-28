@@ -7,12 +7,12 @@ H3C SSL VPN 客户端 + 持久化服务（macOS / Linux）。基于自己的
 
 | 里程碑 | 状态 |
 |---|---|
-| M0 基线（workspace / fork 构建 / CI） | ✅ 代码完成；CI runner 结果待确认 |
+| M0 基线（workspace / fork 构建 / CI） | ✅ GitHub Actions 四平台 CI 通过 |
 | M1 fork 协议引擎（组帧 / 心跳 / DPD / 重连） | ✅ 已实测通过 |
 | M2 daemon + CLI 核心 | ✅ 已实测通过（script-tun 模式） |
 | M3 Linux 服务化（routectl / systemd / netwatch） | ✅ 真机验收通过（A31–A37/A29/A39/A30） |
 | M4 macOS 服务化（routectl / LaunchDaemon） | ✅ 真机验收通过（A31/A33/A36/A38/A29） |
-| M5 安全收敛 / 发布 | 🟡 24h soak 与 GitHub Actions 四平台 CI 待收尾 |
+| M5 安全收敛 / 发布 | 🟡 仅剩 24h soak 与发布动作 |
 
 ## 架构速览
 
