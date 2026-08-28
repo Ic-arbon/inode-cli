@@ -25,12 +25,6 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@v16
 
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
-        with:
-          # FlakeHub cache requires a separate FlakeHub account; keep only
-          # the GitHub Actions cache so CI works without extra auth.
-          use-flakehub: false
-
       - name: Flake check
         run: nix flake check --print-build-logs
 
