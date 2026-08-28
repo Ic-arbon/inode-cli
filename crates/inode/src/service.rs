@@ -103,6 +103,26 @@ fn sudo(args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Run a best-effort sudo command without leaking its output to the user.
+/// Used for cleanup steps such as `launchctl bootout` where "not loaded" is
+/// an expected, harmless condition on fresh installs.
+#[cfg(target_os = "macos")]
+fn sudo_quiet(args: &[&str]) -> Result<(), String> {
+    if std::env::var("INODE_SERVICE_DRY_RUN").is_ok_and(|v| v == "1") {
+        println!("[dry-run] sudo {}", args.join(" "));
+        return Ok(());
+    }
+    let output = Command::new("sudo")
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run sudo: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("sudo {:?} exited {}", args, output.status))
+    }
+}
+
 fn stable_root_for(exec: &Path) -> Result<&Path, String> {
     exec.parent()
         .ok_or_else(|| format!("executable path has no parent: {}", exec.display()))
@@ -217,7 +237,7 @@ pub fn enable(uid: u32, now: bool) -> Result<(), String> {
         LAUNCHD_PLIST,
     ])?;
     let _ = std::fs::remove_file(tmp);
-    let _ = sudo(&["launchctl", "bootout", &format!("system/{LAUNCHD_LABEL}")]);
+    let _ = sudo_quiet(&["launchctl", "bootout", &format!("system/{LAUNCHD_LABEL}")]);
     sudo(&["launchctl", "bootstrap", "system", LAUNCHD_PLIST])?;
     if now {
         sudo(&[
@@ -233,7 +253,7 @@ pub fn enable(uid: u32, now: bool) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 pub fn disable(_uid: u32, now: bool) -> Result<(), String> {
     if now {
-        let _ = sudo(&["launchctl", "bootout", &format!("system/{LAUNCHD_LABEL}")]);
+        let _ = sudo_quiet(&["launchctl", "bootout", &format!("system/{LAUNCHD_LABEL}")]);
     }
     sudo(&["rm", "-f", LAUNCHD_PLIST])
 }
