@@ -1,4 +1,4 @@
-//! `inode-vpnd` — root VPN daemon (M2).
+//! `inode-vpnd` — root VPN daemon.
 //!
 //! Engine runs libopenconnect in a dedicated thread; an IPC thread serves
 //! JSON-RPC 2.0 over a Unix domain socket.
@@ -41,12 +41,12 @@ struct Cli {
     #[arg(long, hide = true)]
     socket: Option<PathBuf>,
 
-    /// Run one foreground engine cycle and exit (M0 smoke test only).
+    /// Run one foreground engine cycle and exit (smoke test only).
     #[arg(long, hide = true)]
     smoke: bool,
 
     /// Use openconnect script-tun with this command instead of a real tun
-    /// device (M2 tests; production uses setup_tun_device).
+    /// device (tests; production uses setup_tun_device).
     #[arg(long, hide = true)]
     tun_script: Option<String>,
 }

@@ -1,4 +1,4 @@
-//! macOS route executor for inode-routectl (M4).
+//! macOS route executor for inode-routectl.
 //!
 //! Uses `ifconfig`/`route`/`scutil` equivalents, mirroring what the legacy
 //! shell script did. DNS service-name handling stays best-effort for v1.

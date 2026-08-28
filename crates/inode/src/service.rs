@@ -1,4 +1,4 @@
-//! System service installation helpers (Linux: systemd, M3).
+//! System service installation helpers (Linux: systemd).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

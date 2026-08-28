@@ -43,7 +43,7 @@
 
 ---
 
-## 1. Linux 真机（M3，验收 A31–A37）
+## 1. Linux 真机（验收 A31–A37）
 
 ### 1.1 安装并启动服务
 
@@ -163,7 +163,7 @@ journalctl -u inode-vpnd@<uid> --since '24 hours ago' | grep -E 'Read error|reco
 
 ---
 
-## 2. macOS 真机（M4，验收 A31–A33、A36、A38）
+## 2. macOS 真机（验收 A31–A33、A36、A38）
 
 ### 2.1 安装并启动 LaunchDaemon
 

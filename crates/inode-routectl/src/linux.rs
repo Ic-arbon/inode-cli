@@ -1,4 +1,4 @@
-//! Linux route/DNS executor for inode-routectl (M3).
+//! Linux route/DNS executor for inode-routectl.
 //!
 //! `connect/reconnect` persists the discovered physical path so that
 //! `disconnect` can remove routes even after the routing table changed.

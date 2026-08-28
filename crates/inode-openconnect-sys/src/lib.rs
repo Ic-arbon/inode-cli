@@ -1,8 +1,8 @@
 //! FFI bindings and wire helpers for `libopenconnect-h3c` (our v9.21 fork).
 //!
-//! M0 provided the wire-format constants. M1 adds a pure-Rust frame codec
-//! used for golden tests and later daemon diagnostics. Bindgen-generated
-//! bindings for the fork arrive in M2, driven by `OPENCONNECT_H3C_DEV`.
+//! Provides the wire-format constants and a pure-Rust frame codec used for
+//! golden tests and daemon diagnostics, plus bindgen-generated bindings for
+//! the fork driven by `OPENCONNECT_H3C_DEV`.
 
 /// Public libopenconnect API version we target (upstream v9.x, API 5.8).
 pub const OPENCONNECT_API_VERSION_MAJOR: u32 = 5;

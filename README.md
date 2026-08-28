@@ -5,14 +5,8 @@ H3C SSL VPN 客户端 + 持久化服务（macOS / Linux）。基于自己的
 
 ## 当前状态
 
-| 里程碑 | 状态 |
-|---|---|
-| M0 基线（workspace / fork 构建 / CI） | ✅ GitHub Actions 四平台 CI 通过 |
-| M1 fork 协议引擎（组帧 / 心跳 / DPD / 重连） | ✅ 已实测通过 |
-| M2 daemon + CLI 核心 | ✅ 已实测通过（script-tun 模式） |
-| M3 Linux 服务化（routectl / systemd / netwatch） | ✅ 真机验收通过（A31–A37/A29/A39/A30） |
-| M4 macOS 服务化（routectl / LaunchDaemon） | ✅ 真机验收通过（A31/A33/A36/A38/A29） |
-| M5 安全收敛 / 发布 | 🟡 仅剩 24h soak 与发布动作 |
+v1.0.0 功能已完成：GitHub Actions 四平台 CI 通过，Linux/macOS 真机验收通过。
+当前仅剩 24h soak 与正式发布动作。
 
 ## 架构速览
 
@@ -110,5 +104,5 @@ inode diagnose             # 脱敏诊断包
 
 ## 已知待办
 
-- Linux/macOS 真机验收矩阵（见开发计划 A31–A40）。
+- Linux/macOS 真机验收记录见 `docs/acceptance-runbook.md`（A31–A40）。
 - macOS DNS 服务名发现待补。

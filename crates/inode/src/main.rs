@@ -1,4 +1,4 @@
-//! `inode` — user-facing CLI (M2: real IPC to inode-vpnd).
+//! `inode` — user-facing CLI for inode-vpn.
 
 use clap::{CommandFactory, Parser, Subcommand};
 use inode_core::ipc::{self, Request, Response};
@@ -46,17 +46,17 @@ enum Command {
     },
     /// Show or follow daemon logs.
     Logs {
-        /// Follow new log lines (not implemented yet in M2).
+        /// Follow new log lines.
         #[arg(short, long)]
         follow: bool,
     },
-    /// Install/enable the system service (M3/M4).
+    /// Install/enable the system service.
     Enable {
         /// Also connect immediately.
         #[arg(long)]
         now: bool,
     },
-    /// Disable/uninstall the system service (M3/M4).
+    /// Disable/uninstall the system service.
     Disable {
         /// Also disconnect immediately.
         #[arg(long)]
@@ -65,7 +65,7 @@ enum Command {
     /// Configuration helpers.
     #[command(subcommand)]
     Config(ConfigCommand),
-    /// Produce a redacted diagnostic bundle (M5).
+    /// Produce a redacted diagnostic bundle.
     Diagnose,
     /// Discover the gateway certificate pin (TOFU, pin-sha256 = SPKI hash).
     DiscoverCert {
@@ -79,7 +79,7 @@ enum Command {
 enum ConfigCommand {
     /// Print effective configuration (secrets redacted).
     Show,
-    /// Set a configuration value (not implemented yet).
+    /// Set a configuration value.
     Set { key: String, value: String },
     /// Migrate legacy `.auth` to ~/.config/inode-vpn/config.toml (0600).
     Migrate,
