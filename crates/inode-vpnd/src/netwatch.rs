@@ -346,6 +346,7 @@ fn changed_keys_changed_physical_network(keys: ffi::CFArrayRef) -> bool {
 }
 
 /// SCDynamicStore key filter shared by the watcher and its unit tests.
+#[cfg(any(target_os = "macos", test))]
 fn interesting_macos_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     let ignored = [
