@@ -9,8 +9,11 @@
     };
 
     # Base source for our own libopenconnect fork (v9.21 + H3C protocol).
+    # GitLab archive is used instead of the upstream infradead.org tarball
+    # because GitHub Actions' x86_64-darwin runners intermittently cannot
+    # resolve www.infradead.org.
     openconnect-v921-src = {
-      url = "https://www.infradead.org/openconnect/download/openconnect-9.21.tar.gz";
+      url = "https://gitlab.com/openconnect/openconnect/-/archive/v9.21/openconnect-v9.21.tar.gz";
       flake = false;
     };
   };

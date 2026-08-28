@@ -52,14 +52,14 @@
     "openconnect-v921-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1781609588,
-        "narHash": "sha256-PSiqpddNThhBq93+MX7ydNvnOu3UCBFFj5600ZsP25Q=",
+        "lastModified": 1781609566,
+        "narHash": "sha256-Jtd4cIR6BWSQPmLm8UOvlEcC1g6QlMgFw/aM7cokOCw=",
         "type": "tarball",
-        "url": "https://www.infradead.org/openconnect/download/openconnect-9.21.tar.gz"
+        "url": "https://gitlab.com/openconnect/openconnect/-/archive/v9.21/openconnect-v9.21.tar.gz"
       },
       "original": {
         "type": "tarball",
-        "url": "https://www.infradead.org/openconnect/download/openconnect-9.21.tar.gz"
+        "url": "https://gitlab.com/openconnect/openconnect/-/archive/v9.21/openconnect-v9.21.tar.gz"
       }
     },
     "root": {
