@@ -15,9 +15,9 @@ jobs:
             label: x86_64-linux
           - os: ubuntu-24.04-arm
             label: aarch64-linux
-          - os: macos-13
+          - os: macos-15-intel
             label: x86_64-darwin
-          - os: macos-14
+          - os: macos-15
             label: aarch64-darwin
     runs-on: ${{ matrix.os }}
     steps:
@@ -26,6 +26,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
 
       - uses: DeterminateSystems/magic-nix-cache-action@v8
+        with:
+          # FlakeHub cache requires a separate FlakeHub account; keep only
+          # the GitHub Actions cache so CI works without extra auth.
+          use-flakehub: false
 
       - name: Flake check
         run: nix flake check --print-build-logs
