@@ -75,6 +75,7 @@ struct Inner {
     target_gid: u32,
     stop_requested: bool,
     last_net_event: Option<Instant>,
+    retry_generation: u64,
     cmd_fd: Option<RawFd>,
     engine: Option<JoinHandle<()>>,
     tun_script: Option<String>,
@@ -103,6 +104,7 @@ impl Shared {
                 target_gid,
                 stop_requested: false,
                 last_net_event: None,
+                retry_generation: 0,
                 cmd_fd: None,
                 engine: None,
                 tun_script,
@@ -286,6 +288,53 @@ impl Shared {
         inner.engine = None;
     }
 
+    /// Retry a failed engine on `restart_delay` intervals while the physical
+    /// network is absent, then start it as soon as the network is back.
+    ///
+    /// This covers the case netwatch cannot: lid open after sleep may restore
+    /// Wi-Fi without any address/link change event, so the failed engine must
+    /// poll the default route itself. `restart_delay` is documented in
+    /// `config.toml` and defaults to 10 seconds.
+    fn schedule_engine_retry(self: &Arc<Self>, config: Config) {
+        let (generation, delay) = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.stop_requested {
+                return;
+            }
+            inner.retry_generation += 1;
+            (inner.retry_generation, config.service.restart_delay.max(1))
+        };
+        let shared = Arc::clone(self);
+        thread::Builder::new()
+            .name("inode-engine-retry".into())
+            .spawn(move || loop {
+                thread::sleep(std::time::Duration::from_secs(delay));
+                {
+                    let inner = shared.inner.lock().unwrap();
+                    if inner.stop_requested
+                        || inner.retry_generation != generation
+                        || inner.engine.is_some()
+                        || inner.state != SessionState::Failed
+                    {
+                        return;
+                    }
+                }
+                if !network_up() {
+                    tracing::debug!("engine retry: network still down");
+                    continue;
+                }
+                tracing::info!("engine failed; network is up, restarting");
+                match shared.engine_start(config.clone()) {
+                    Ok(()) => return,
+                    Err(e) => {
+                        tracing::warn!("engine retry start failed: {e}");
+                        return;
+                    }
+                }
+            })
+            .expect("spawn engine retry thread");
+    }
+
     fn snapshot(&self) -> StatusSnapshot {
         let inner = self.inner.lock().unwrap();
         StatusSnapshot {
@@ -375,6 +424,7 @@ impl Shared {
             inner.stop_requested = false;
             inner.last_error = None;
             inner.config = Some(config.clone());
+            inner.retry_generation += 1;
         }
         self.add_redaction_secrets(&config);
         let shared = Arc::clone(self);
@@ -382,12 +432,56 @@ impl Shared {
             let inner = self.inner.lock().unwrap();
             inner.tun_script.clone()
         };
+        let shared_for_thread = Arc::clone(&shared);
+        let retry_config = config.clone();
         let handle = thread::Builder::new()
             .name("inode-engine".into())
-            .spawn(move || engine_run(Arc::clone(&shared), config, tun_script))
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine_run(
+                        Arc::clone(&shared_for_thread),
+                        retry_config.clone(),
+                        tun_script,
+                    );
+                }));
+                if result.is_err() {
+                    tracing::error!("engine thread panicked");
+                    shared_for_thread
+                        .set_state(SessionState::Failed, Some("engine thread panicked".into()));
+                    shared_for_thread.schedule_engine_retry(retry_config);
+                }
+            })
             .map_err(|e| Error::Ipc(format!("spawn engine failed: {e}")))?;
         self.set_engine(Some(handle));
         Ok(())
+    }
+}
+
+/// Cheap "is there a usable default route" probe for the retry loop.
+fn network_up() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("route")
+            .args(["-n", "get", "default"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(output) = std::process::Command::new("ip")
+            .args(["route", "show", "default"])
+            .output()
+        else {
+            return false;
+        };
+        output.status.success() && !output.stdout.is_empty()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        false
     }
 }
 
@@ -790,14 +884,18 @@ fn engine_run(shared: Arc<Shared>, config: Config, tun_script: Option<String>) {
     if let Err(e) = result {
         let msg = e.to_string();
         tracing::error!(error = %msg, "engine stopped");
+        let stopped = shared.stop_requested();
         shared.set_state(
-            if shared.stop_requested() {
+            if stopped {
                 SessionState::Stopped
             } else {
                 SessionState::Failed
             },
             Some(msg),
         );
+        if !stopped {
+            shared.schedule_engine_retry(config);
+        }
     }
 }
 
